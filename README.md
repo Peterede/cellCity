@@ -64,6 +64,25 @@ A building left without power, water or road access empties out and is eventuall
 
 The city saves automatically every month and whenever the app is paused; **NEW** starts over after a confirmation.
 
+## Progression & goals
+
+A fresh city starts with a basic set of tools: roads, zones, parks, power, water and the buried mains/cables. Everything else — rail, highways, train stations, the emergency services and the airport — has to be **earned** by growing the city. Tap the goal counter (**e.g. `0/8`**) in the top bar to open the goals sheet.
+
+Each milestone pays a cash bonus and, for the early ones, unlocks new tools:
+
+| # | Milestone | Goal | Reward |
+| --- | --- | --- | --- |
+| 1 | First Residents | Reach 10 population | $250 + **Rail** |
+| 2 | Hamlet | Reach 100 population | $500 + **Train station, Highway** |
+| 3 | Steady Hands | 30 stable days in a row | $750 + **Police, Fire** |
+| 4 | Town | Reach 500 population | $1,000 + **Hospital** |
+| 5 | Skyline | Merge four lots into one large building | $1,500 + **Airport** |
+| 6 | City | Reach 1,000 population | $3,000 |
+| 7 | Stable Cycle | 100 stable days in a row | $5,000 |
+| 8 | Metropolis | Reach 5,000 population | $10,000 |
+
+A day counts toward a **stable streak** when the city has at least 20 residents, happiness is at least 55 and the treasury is not losing money that day. Milestones only advance in order: a run of 100 stable days ticks the *Stable Hands* goal before it counts toward the *Stable Cycle*. Locked tools show a padlock in the toolbar; tapping one tells you to open GOALS.
+
 ## Controls
 
 - **Tap / drag on the map** — use the selected tool.

@@ -17,6 +17,7 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class GameView(context: Context) : View(context) {
 
@@ -24,6 +25,7 @@ class GameView(context: Context) : View(context) {
     private val prefs = context.getSharedPreferences("cellcity", Context.MODE_PRIVATE)
     private var engine: CityEngine = loadCity()
     private val renderer = CityRenderer(density)
+    private val sound = SoundManager(context)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private var selected = Tool.ROAD
@@ -44,6 +46,27 @@ class GameView(context: Context) : View(context) {
     private val toolRects = Array(Tool.values().size) { RectF() }
     private val speedRect = RectF()
     private val newRect = RectF()
+    private val goalsRect = RectF()
+    private val soundRect = RectF()
+    private var goalsOpen = false
+
+    // long-press hover card
+    private var tooltipCol = -1
+    private var tooltipRow = -1
+    private var tooltipActive = false
+    private var pressStart = 0L
+    private var pressX = 0f
+    private var pressY = 0f
+
+    private val longPressRunnable = Runnable {
+        if (!engine.inBounds(hoverCol, hoverRow)) return@Runnable
+        tooltipCol = hoverCol
+        tooltipRow = hoverRow
+        tooltipActive = true
+        lastHaptic = System.currentTimeMillis()
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        invalidate()
+    }
 
     private var hoverCol = Config.COLS / 2
     private var hoverRow = Config.ROWS / 2
@@ -130,6 +153,7 @@ class GameView(context: Context) : View(context) {
     init {
         renderer.camera.panX = 0f
         renderer.camera.panY = 0f
+        sound.enabled = prefs.getBoolean(SOUND_KEY, true)
         banner("Welcome to Cell City!", Config.INK)
         bannerTimer = 5f
     }
@@ -140,13 +164,19 @@ class GameView(context: Context) : View(context) {
         if (running) return
         running = true
         lastFrame = System.nanoTime()
+        sound.resumeAmbient()
         postOnAnimation(onDrawFrame)
     }
 
     fun onDeactivated() {
         running = false
         removeCallbacks(onDrawFrame)
+        sound.pauseAmbient()
         saveCity()
+    }
+
+    fun onReleased() {
+        sound.release()
     }
 
     private fun loadCity(): CityEngine {
@@ -175,6 +205,7 @@ class GameView(context: Context) : View(context) {
             }
             renderer.updateCars(dt, engine)
         }
+        renderer.updateAnimations(dt)
     }
 
     private fun handleEvents() {
@@ -189,10 +220,36 @@ class GameView(context: Context) : View(context) {
                     saveCity()
                 }
                 is CityEvent.Notice -> banner(event.text, amber)
-                is CityEvent.Merged -> banner(
-                    "Four lots became one large ${event.zone.label.lowercase()} building",
-                    mint
-                )
+                is CityEvent.MilestoneReached -> {
+                    val unlockText = if (event.milestone.unlocks.isNotEmpty()) {
+                        " - unlocked ${event.milestone.unlocks.joinToString(", ") { it.label }}"
+                    } else {
+                        ""
+                    }
+                    banner(
+                        "Goal reached: ${event.milestone.title}  +$${event.milestone.cash}$unlockText",
+                        green
+                    )
+                }
+                is CityEvent.Grew -> {
+                    renderer.flashBirth(event.col, event.row)
+                    sound.playBirth()
+                }
+                is CityEvent.Upgraded -> {
+                    sound.playUpgrade()
+                }
+                is CityEvent.Died -> {
+                    renderer.flashDeath(event.col, event.row)
+                    sound.playDeath()
+                }
+                is CityEvent.Built -> sound.playBuild()
+                is CityEvent.Merged -> {
+                    renderer.flashBirth(event.col, event.row)
+                    banner(
+                        "Four lots became one large ${event.zone.label.lowercase()} building",
+                        mint
+                    )
+                }
                 else -> Unit
             }
         }
@@ -238,6 +295,14 @@ class GameView(context: Context) : View(context) {
             speedRect.left - 40f * density, top + 8f * density,
             speedRect.left - 6f * density, top + 34f * density
         )
+        goalsRect.set(
+            newRect.left - 44f * density, top + 8f * density,
+            newRect.left - 6f * density, top + 34f * density
+        )
+        soundRect.set(
+            goalsRect.left - 40f * density, top + 8f * density,
+            goalsRect.left - 6f * density, top + 34f * density
+        )
     }
 
     private fun updateCameraLayout(w: Float, h: Float) {
@@ -267,6 +332,127 @@ class GameView(context: Context) : View(context) {
         drawTopBar(canvas, w)
         drawBanner(canvas, w)
         drawToolbar(canvas, w, h)
+        if (tooltipActive) drawTooltip(canvas, w, h)
+        if (goalsOpen) drawGoalsOverlay(canvas, w, h)
+    }
+
+    /** The bounds of the goals sheet: a tall panel across the middle of the screen. */
+    private fun goalsLayout(w: Float): RectF {
+        val margin = 12f * density
+        val top = hudPanelBottom + 8f * density
+        val bottom = toolbarTop - 8f * density
+        return RectF(margin, top, w - margin, bottom)
+    }
+
+    private fun goalsRowRect(index: Int, panel: RectF): RectF {
+        val pad = 12f * density
+        val headerH = 46f * density
+        val footerH = 18f * density
+        val available = panel.height() - headerH - footerH
+        val rowH = min(34f * density, available / Milestone.values().size)
+        val headY = panel.top + headerH
+        val left = panel.left + pad
+        val top = headY + index * rowH
+        return RectF(left, top, panel.right - pad, top + rowH - 4f * density)
+    }
+
+    private fun drawGoalsOverlay(canvas: Canvas, w: Float, h: Float) {
+        fill.color = 0xB014263B.toInt()
+        canvas.drawRect(0f, 0f, w, h, fill)
+
+        val panel = goalsLayout(w)
+        drawPanel(canvas, panel.left, panel.top, panel.right, panel.bottom, paper, 3f * density)
+
+        titlePaint.textSize = 15f * density
+        titlePaint.color = ink
+        canvas.drawText("GOALS", panel.left + 12f * density, panel.top + 24f * density, titlePaint)
+
+        text.textSize = 9f * density
+        text.color = muted
+        canvas.drawText(
+            "${engine.completedMilestones.size} of ${Milestone.values().size} complete  ·  " +
+                "stable streak ${engine.stableDays} days",
+            panel.left + 12f * density,
+            panel.top + 38f * density,
+            text
+        )
+
+        for ((i, milestone) in Milestone.values().withIndex()) {
+            drawGoalRow(canvas, milestone, goalsRowRect(i, panel))
+        }
+
+        text.textSize = 8.5f * density
+        text.color = muted
+        text.textAlign = Paint.Align.CENTER
+        canvas.drawText("Tap anywhere to close", panel.centerX(), panel.bottom - 8f * density, text)
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawGoalRow(canvas: Canvas, milestone: Milestone, r: RectF) {
+        val done = milestone in engine.completedMilestones
+        val current = engine.nextMilestone() == milestone
+        val radius = 8f * density
+        fill.color = when {
+            done -> 0xFFDCEBD6.toInt()
+            current -> 0xFFFFF2CE.toInt()
+            else -> 0xFFF1EAD8.toInt()
+        }
+        canvas.drawRoundRect(r, radius, radius, fill)
+        stroke.color = if (current) amber else ink
+        stroke.strokeWidth = if (current) 2.4f * density else 1.3f * density
+        canvas.drawRoundRect(r, radius, radius, stroke)
+
+        // tick / bullet
+        val bx = r.left + 15f * density
+        val by = r.centerY()
+        if (done) {
+            fill.color = green
+            canvas.drawCircle(bx, by, 7f * density, fill)
+            stroke.color = paper
+            stroke.strokeWidth = 2f * density
+            path.reset()
+            path.moveTo(bx - 3.4f * density, by)
+            path.lineTo(bx - 0.8f * density, by + 2.8f * density)
+            path.lineTo(bx + 3.6f * density, by - 3f * density)
+            canvas.drawPath(path, stroke)
+        } else {
+            stroke.color = if (current) amber else muted
+            stroke.strokeWidth = 1.8f * density
+            canvas.drawCircle(bx, by, 6f * density, stroke)
+        }
+
+        val textLeft = bx + 14f * density
+        textBold.textSize = 10.5f * density
+        textBold.color = ink
+        textBold.textAlign = Paint.Align.LEFT
+        canvas.drawText(milestone.title, textLeft, r.top + 14f * density, textBold)
+
+        text.textSize = 8.5f * density
+        text.color = muted
+        canvas.drawText(milestone.detail, textLeft, r.top + 25f * density, text)
+
+        // progress or reward on the right
+        textBold.textAlign = Paint.Align.RIGHT
+        textBold.textSize = 9.5f * density
+        if (!done) {
+            val value = engine.milestoneValue(milestone).coerceAtMost(engine.milestoneTarget(milestone))
+            textBold.color = ink
+            canvas.drawText("$value/${engine.milestoneTarget(milestone)}", r.right - 10f * density, r.centerY() + 3f * density, textBold)
+        } else {
+            textBold.color = 0xFF3E7A45.toInt()
+            canvas.drawText("+$${milestone.cash}", r.right - 10f * density, r.centerY() + 3f * density, textBold)
+        }
+        textBold.textAlign = Paint.Align.LEFT
+
+        // unlock chip
+        if (milestone.unlocks.isNotEmpty()) {
+            val names = milestone.unlocks.joinToString(", ") { it.label }
+            text.textSize = 7.5f * density
+            text.color = 0xFF3C6E9E.toInt()
+            text.textAlign = Paint.Align.RIGHT
+            canvas.drawText("unlocks $names", r.right - 10f * density, r.top + 12f * density, text)
+            text.textAlign = Paint.Align.LEFT
+        }
     }
 
     private fun drawTopBar(canvas: Canvas, w: Float) {
@@ -292,9 +478,22 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("NEW", newRect.centerX(), newRect.centerY() + 3f * density, textBold)
         textBold.textAlign = Paint.Align.LEFT
 
+        // goals button
+        drawSmallButton(canvas, goalsRect)
+        val done = engine.completedMilestones.size
+        textBold.textSize = 8.5f * density
+        textBold.color = ink
+        textBold.textAlign = Paint.Align.CENTER
+        canvas.drawText("$done/${Milestone.values().size}", goalsRect.centerX(), goalsRect.centerY() + 3f * density, textBold)
+        textBold.textAlign = Paint.Align.LEFT
+
+        // sound toggle
+        drawSmallButton(canvas, soundRect)
+        drawSoundIcon(canvas, soundRect)
+
         textRight.textSize = 10f * density
         textRight.color = ink
-        canvas.drawText(engine.dateLabel, newRect.left - 8f * density, top + 23f * density, textRight)
+        canvas.drawText(engine.dateLabel, soundRect.left - 8f * density, top + 23f * density, textRight)
 
         // funds
         val fundsY = top + 52f * density
@@ -439,6 +638,95 @@ class GameView(context: Context) : View(context) {
         )
     }
 
+    private fun drawTooltip(canvas: Canvas, w: Float, h: Float) {
+        val tile = engine.tile(tooltipCol, tooltipRow) ?: return
+        val counts = engine.neighborCounts(tooltipCol, tooltipRow)
+        val income = engine.incomePerTick(tile)
+
+        // size the card to its contents
+        val pad = 10f * density
+        val lineH = 13f * density
+        val titleH = 20f * density
+        val rows = ArrayList<Pair<String, String>>(6)
+        rows.add("Income" to incomeLabel(income))
+        if (tile.zone.isZone) {
+            rows.add("Level" to if (tile.level == 0) "vacant" else "L${tile.level} of ${Config.MAX_LEVEL}")
+            rows.add("Inside" to "${tile.population + tile.jobs}")
+            rows.add("Road / power / water" to "${tick(tile.roadAccess)}  ${tick(tile.powered)}  ${tick(tile.watered)}")
+        }
+        rows.add("Neighbours" to "R${counts.developed} C${counts.zoned} B${counts.built} / 8")
+
+        val cardW = 176f * density
+        val cardH = titleH + rows.size * lineH + pad * 1.6f
+
+        // anchor the card to the tile's projected position
+        val anchorX = renderer.camera.screenX(tooltipCol.toFloat(), tooltipRow.toFloat())
+        val anchorY = renderer.camera.screenY(tooltipCol.toFloat(), tooltipRow.toFloat())
+        var left = anchorX + 18f * density
+        var top = anchorY - cardH - 12f * density
+        if (left + cardW > w - 8f * density) left = anchorX - cardW - 18f * density
+        left = left.coerceIn(8f * density, w - cardW - 8f * density)
+        top = top.coerceIn(hudPanelBottom + 6f * density, toolbarTop - cardH - 6f * density)
+
+        val right = left + cardW
+        val bottom = top + cardH
+        fill.color = ink
+        rect.set(left + 2f * density, top + 3f * density, right + 2f * density, bottom + 3f * density)
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, fill)
+        fill.color = paper
+        rect.set(left, top, right, bottom)
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, fill)
+        stroke.color = amber
+        stroke.strokeWidth = 2.4f * density
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, stroke)
+
+        // small pointer triangle toward the tile
+        path.reset()
+        val tipY = if (top > anchorY) top else bottom
+        val dir = if (top > anchorY) -1f else 1f
+        val tipX = anchorX.coerceIn(left + 12f * density, right - 12f * density)
+        path.moveTo(tipX, tipY)
+        path.lineTo(tipX - 6f * density, tipY + dir * 8f * density)
+        path.lineTo(tipX + 6f * density, tipY + dir * 8f * density)
+        path.close()
+        fill.color = paper
+        canvas.drawPath(path, fill)
+        stroke.color = amber
+        stroke.strokeWidth = 2.4f * density
+        canvas.drawPath(path, stroke)
+
+        titlePaint.textSize = 12f * density
+        titlePaint.color = ink
+        canvas.drawText(engine.tileState(tile), left + pad, top + titleH, titlePaint)
+
+        text.textSize = 9f * density
+        var y = top + titleH + lineH * 0.6f
+        for ((label, value) in rows) {
+            text.color = muted
+            text.textAlign = Paint.Align.LEFT
+            canvas.drawText(label, left + pad, y, text)
+            textBold.textSize = 9f * density
+            textBold.color = when {
+                label == "Income" && income < 0 -> coral
+                label == "Income" -> green
+                else -> ink
+            }
+            textBold.textAlign = Paint.Align.RIGHT
+            canvas.drawText(value, right - pad, y, textBold)
+            y += lineH
+        }
+        textBold.textAlign = Paint.Align.LEFT
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun tick(value: Boolean): String = if (value) "yes" else "NO"
+
+    private fun incomeLabel(income: Float): String {
+        val cents = (income * 100).roundToInt()
+        val sign = if (cents < 0) "-" else "+"
+        return "$sign$${abs(cents) / 100}.${(abs(cents) % 100).toString().padStart(2, '0')}/day"
+    }
+
     private fun drawToolbar(canvas: Canvas, w: Float, h: Float) {
         val top = toolbarTop
         fill.color = cream
@@ -469,6 +757,7 @@ class GameView(context: Context) : View(context) {
 
     private fun drawToolButton(canvas: Canvas, tool: Tool, r: RectF) {
         val selectedNow = tool == selected
+        val unlocked = engine.isUnlocked(tool)
         val cost = engine.baseCost(tool)
         val affordable = cost <= engine.funds || tool == Tool.BULLDOZE || tool == Tool.PAN
         val radius = 9f * density
@@ -481,6 +770,7 @@ class GameView(context: Context) : View(context) {
 
         fill.color = when {
             selectedNow -> amber
+            !unlocked -> 0xFFD8D2C4.toInt()
             !affordable -> 0xFFE8E0CD.toInt()
             else -> paper
         }
@@ -489,15 +779,19 @@ class GameView(context: Context) : View(context) {
         stroke.strokeWidth = if (selectedNow) 2.6f * density else 1.6f * density
         canvas.drawRoundRect(r, radius, radius, stroke)
 
-        val iconColor = if (!affordable) muted else ink
+        val iconColor = if (!unlocked || !affordable) muted else ink
         val cx = r.centerX()
         val cy = r.top + 16f * density
         drawToolIcon(canvas, tool, cx, cy, 9.5f * density, iconColor)
 
         textBold.textSize = 8.2f * density
-        textBold.color = if (!affordable) muted else ink
+        textBold.color = if (!unlocked || !affordable) muted else ink
         textBold.textAlign = Paint.Align.CENTER
-        val label = if (cost > 0) "${tool.label} ${costLabel(cost)}" else tool.label
+        val label = when {
+            !unlocked -> "LOCKED"
+            cost > 0 -> "${tool.label} ${costLabel(cost)}"
+            else -> tool.label
+        }
         canvas.drawText(
             fitText(label, textBold, r.width() - 8f * density),
             r.centerX(),
@@ -505,6 +799,30 @@ class GameView(context: Context) : View(context) {
             textBold
         )
         textBold.textAlign = Paint.Align.LEFT
+
+        if (!unlocked) {
+            stroke.color = ink
+            stroke.strokeWidth = 1.7f * density
+            padlock(canvas, cx, cy, 7.5f * density)
+        }
+    }
+
+    private fun padlock(canvas: Canvas, cx: Float, cy: Float, s: Float) {
+        stroke.color = muted
+        stroke.strokeWidth = 2f * density
+        path.reset()
+        path.moveTo(cx - s * 0.45f, cy - s * 0.1f)
+        path.lineTo(cx - s * 0.45f, cy - s * 0.55f)
+        path.quadTo(cx - s * 0.45f, cy - s * 1.05f, cx, cy - s * 1.05f)
+        path.quadTo(cx + s * 0.45f, cy - s * 1.05f, cx + s * 0.45f, cy - s * 0.55f)
+        path.lineTo(cx + s * 0.45f, cy - s * 0.1f)
+        canvas.drawPath(path, stroke)
+        fill.color = 0xFFB7AE9B.toInt()
+        rect.set(cx - s * 0.7f, cy - s * 0.2f, cx + s * 0.7f, cy + s * 0.7f)
+        canvas.drawRoundRect(rect, 2f * density, 2f * density, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 1.3f * density
+        canvas.drawRoundRect(rect, 2f * density, 2f * density, stroke)
     }
 
     private fun drawToolIcon(canvas: Canvas, tool: Tool, cx: Float, cy: Float, s: Float, color: Int) {
@@ -875,6 +1193,45 @@ class GameView(context: Context) : View(context) {
         canvas.drawRoundRect(r, 7f * density, 7f * density, stroke)
     }
 
+    private fun drawSoundIcon(canvas: Canvas, r: RectF) {
+        val on = sound.enabled
+        val cx = r.centerX()
+        val cy = r.centerY()
+        val s = 4.2f * density
+        fill.color = if (on) ink else muted
+        // speaker body
+        path.reset()
+        path.moveTo(cx - s * 0.9f, cy - s * 0.32f)
+        path.lineTo(cx - s * 0.4f, cy - s * 0.32f)
+        path.lineTo(cx + s * 0.15f, cy - s * 0.85f)
+        path.lineTo(cx + s * 0.15f, cy + s * 0.85f)
+        path.lineTo(cx - s * 0.4f, cy + s * 0.32f)
+        path.lineTo(cx - s * 0.9f, cy + s * 0.32f)
+        path.close()
+        canvas.drawPath(path, fill)
+        if (on) {
+            stroke.color = ink
+            stroke.strokeWidth = 1.4f * density
+            path.reset()
+            path.moveTo(cx + s * 0.4f, cy - s * 0.5f)
+            path.quadTo(cx + s * 0.95f, cy, cx + s * 0.4f, cy + s * 0.5f)
+            canvas.drawPath(path, stroke)
+            path.reset()
+            path.moveTo(cx + s * 0.68f, cy - s * 0.85f)
+            path.quadTo(cx + s * 1.35f, cy, cx + s * 0.68f, cy + s * 0.85f)
+            canvas.drawPath(path, stroke)
+        } else {
+            stroke.color = coral
+            stroke.strokeWidth = 1.6f * density
+            path.reset()
+            path.moveTo(cx + s * 0.45f, cy - s * 0.5f)
+            path.lineTo(cx + s * 1.15f, cy + s * 0.5f)
+            path.moveTo(cx + s * 1.15f, cy - s * 0.5f)
+            path.lineTo(cx + s * 0.45f, cy + s * 0.5f)
+            canvas.drawPath(path, stroke)
+        }
+    }
+
     private fun drawSpeedIcon(canvas: Canvas, r: RectF) {
         fill.color = ink
         val cx = r.centerX()
@@ -1009,6 +1366,11 @@ class GameView(context: Context) : View(context) {
         if (engine.mergedBlockCount == 0 && engine.buildingCount > 8) {
             return "Four level-2 lots of a zone merge into one big building"
         }
+        val goal = engine.nextMilestone()
+        if (goal != null && engine.completedMilestones.isNotEmpty()) {
+            val value = engine.milestoneValue(goal).coerceAtMost(engine.milestoneTarget(goal))
+            if (value >= engine.milestoneTarget(goal) - 1) return "GOALS: ${goal.title} is nearly done"
+        }
         return when (selected) {
             Tool.PAN -> "Drag to pan - pinch to zoom"
             Tool.BULLDOZE -> "Tap a tile to clear it (and its main) - 25% refund"
@@ -1042,6 +1404,11 @@ class GameView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 val x = event.x
                 val y = event.y
+                if (goalsOpen) {
+                    goalsOpen = false
+                    performClick()
+                    return true
+                }
                 if (y <= hudPanelBottom + 4f * density) {
                     if (speedRect.contains(x, y)) {
                         cycleSpeed()
@@ -1052,12 +1419,29 @@ class GameView(context: Context) : View(context) {
                         confirmNewCity()
                         return true
                     }
+                    if (goalsRect.contains(x, y)) {
+                        goalsOpen = true
+                        tooltipActive = false
+                        performClick()
+                        return true
+                    }
+                    if (soundRect.contains(x, y)) {
+                        toggleSound()
+                        performClick()
+                        return true
+                    }
                     return true
                 }
                 if (y >= toolbarTop) {
                     for (i in toolRects.indices) {
                         if (toolRects[i].contains(x, y)) {
-                            selected = Tool.values()[i]
+                            val tool = Tool.values()[i]
+                            if (!engine.isUnlocked(tool)) {
+                                banner("${tool.label} unlocks later - see GOALS", coral)
+                                performClick()
+                                return true
+                            }
+                            selected = tool
                             lastPaintCol = -1
                             lastPaintRow = -1
                             performClick()
@@ -1075,13 +1459,19 @@ class GameView(context: Context) : View(context) {
                 lastPaintCol = -1
                 lastPaintRow = -1
                 didPaint = false
+                tooltipActive = false
                 mode = if (selected == Tool.PAN) MODE_PAN else MODE_PAINT
                 updateHover(x, y)
+                if (mode == MODE_PAINT) {
+                    postDelayed(longPressRunnable, LONG_PRESS_MS)
+                }
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount >= 2) {
                     mode = MODE_PINCH
+                    removeCallbacks(longPressRunnable)
+                    tooltipActive = false
                     pinchStartDistance = max(1f, distance(event, 0, 1))
                     pinchStartZoom = renderer.camera.zoom
                     lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
@@ -1126,6 +1516,10 @@ class GameView(context: Context) : View(context) {
                         val y = event.getY(idx)
                         updateHover(x, y)
                         val moved = hypot(x - downX, y - downY)
+                        if (moved > touchSlop) {
+                            removeCallbacks(longPressRunnable)
+                            tooltipActive = false
+                        }
                         if (moved > touchSlop || didPaint) {
                             if (!didPaint) {
                                 paintSegment(downX, downY, downX, downY, force = false)
@@ -1154,7 +1548,10 @@ class GameView(context: Context) : View(context) {
             MotionEvent.ACTION_UP -> {
                 val x = event.x
                 val y = event.y
-                if (mode == MODE_PAINT && (!didPaint || selected.singlePlacement)) {
+                removeCallbacks(longPressRunnable)
+                if (tooltipActive) {
+                    tooltipActive = false
+                } else if (mode == MODE_PAINT && (!didPaint || selected.singlePlacement)) {
                     updateHover(x, y)
                     paintSegment(x, y, x, y, force = true)
                 } else if (mode == MODE_PAN) {
@@ -1165,6 +1562,8 @@ class GameView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(longPressRunnable)
+                tooltipActive = false
                 mode = MODE_NONE
                 activePointer = -1
                 return true
@@ -1277,6 +1676,7 @@ class GameView(context: Context) : View(context) {
                 hoverCol = engine.cols / 2
                 hoverRow = engine.rows / 2
                 dayTimer = 0f
+                goalsOpen = false
                 renderer.focusOn(engine.cols / 2, engine.rows / 2)
                 clampCamera()
                 speed = 1

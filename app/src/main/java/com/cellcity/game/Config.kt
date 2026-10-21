@@ -93,6 +93,19 @@ object Config {
     /** Merged lots get roomier floors than four separate buildings. */
     const val MERGE_CAPACITY_BONUS = 1.35f
 
+    // --- progression -------------------------------------------------------
+    /** Below this many residents a city is too small to judge as "stable". */
+    const val STABLE_MIN_POPULATION = 20
+    /** A stable day needs at least this much happiness. */
+    const val STABLE_MIN_HAPPINESS = 55f
+    const val MILESTONE_POP_FIRST_HOME = 10
+    const val MILESTONE_POP_HAMLET = 100
+    const val MILESTONE_POP_TOWN = 500
+    const val MILESTONE_POP_CITY = 1000
+    const val MILESTONE_POP_METROPOLIS = 5000
+    const val MILESTONE_STEADY_DAYS = 30
+    const val MILESTONE_STABLE_CYCLE_DAYS = 100
+
     // --- demand ------------------------------------------------------------
     const val DEMAND_BASE_R = 0.62f
     const val DEMAND_BASE_C = 0.34f

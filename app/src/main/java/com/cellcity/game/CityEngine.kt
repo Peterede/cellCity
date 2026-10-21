@@ -13,7 +13,8 @@ import kotlin.random.Random
 class CityEngine(
     val cols: Int = Config.COLS,
     val rows: Int = Config.ROWS,
-    seed: Long = 20261020L
+    seed: Long = 20261020L,
+    private val enforceUnlocks: Boolean = true
 ) {
     private val seedValue: Long = seed
     private val rng = Random(seed)
@@ -56,6 +57,18 @@ class CityEngine(
     private var monthIncome = 0f
     private var monthExpenses = 0f
     private var debtWarned = false
+
+    // --- progression -------------------------------------------------------
+    /** Consecutive days the city has counted as stable (populous, happy, in the black). */
+    var stableDays: Int = 0
+        private set
+
+    private val completed = LinkedHashSet<Milestone>()
+
+    /** Saves from before progression existed keep every tool available. */
+    private var legacyUnlockedAll = false
+
+    val completedMilestones: Set<Milestone> get() = completed
 
     init {
         require(cols in 8..64 && rows in 8..64) { "Unsupported map size" }
@@ -105,6 +118,44 @@ class CityEngine(
     val dateLabel: String
         get() = "${MONTHS[(month - 1).coerceIn(0, 11)]} $year"
 
+    // ------------------------------------------------------------- progression
+
+    /** Whether the given tool may be built in this city right now. */
+    fun isUnlocked(tool: Tool): Boolean {
+        if (!enforceUnlocks || legacyUnlockedAll) return true
+        if (tool in Milestone.START_TOOLS) return true
+        return completed.any { tool in it.unlocks }
+    }
+
+    /** The next milestone in line, or null when every goal is done. */
+    fun nextMilestone(): Milestone? = Milestone.values().firstOrNull { it !in completed }
+
+    /** How far the city currently is toward a milestone, in that milestone's units. */
+    fun milestoneValue(milestone: Milestone): Int = when (milestone) {
+        Milestone.FIRST_HOME,
+        Milestone.HAMLET,
+        Milestone.TOWN,
+        Milestone.CITY,
+        Milestone.METROPOLIS -> population
+
+        Milestone.STEADY,
+        Milestone.STABLE_CYCLE -> stableDays
+
+        Milestone.SKYLINE -> min(1, mergedBlockCount)
+    }
+
+    /** The value [milestoneValue] has to reach for the milestone to complete. */
+    fun milestoneTarget(milestone: Milestone): Int = when (milestone) {
+        Milestone.FIRST_HOME -> Config.MILESTONE_POP_FIRST_HOME
+        Milestone.HAMLET -> Config.MILESTONE_POP_HAMLET
+        Milestone.TOWN -> Config.MILESTONE_POP_TOWN
+        Milestone.CITY -> Config.MILESTONE_POP_CITY
+        Milestone.METROPOLIS -> Config.MILESTONE_POP_METROPOLIS
+        Milestone.STEADY -> Config.MILESTONE_STEADY_DAYS
+        Milestone.STABLE_CYCLE -> Config.MILESTONE_STABLE_CYCLE_DAYS
+        Milestone.SKYLINE -> 1
+    }
+
     // ------------------------------------------------------------------ build
 
     fun baseCost(tool: Tool): Int = when (tool) {
@@ -146,6 +197,7 @@ class CityEngine(
         if (!inBounds(col, row)) return BuildResult.OUT_OF_BOUNDS
         val t = grid[row][col]
         if (tool == Tool.BULLDOZE) return BuildResult.OK
+        if (!isUnlocked(tool)) return BuildResult.LOCKED
         if (tool.isLayer) return canBuildLayer(tool, col, row)
         if (t.zone == tool.zone) return BuildResult.OK
         if (tool == Tool.AIRPORT) return canBuildAirport(col, row)
@@ -346,6 +398,7 @@ class CityEngine(
         updateMerges()
         updateHappiness()
         updateEconomy()
+        updateProgression()
         advanceDate()
     }
 
@@ -762,10 +815,14 @@ class CityEngine(
                     val cap = capacityForTile(t)
                     val occupied = if (t.zone == ZoneType.RESIDENTIAL) t.population else t.jobs
                     if (t.distress > Config.DISTRESS_DAYS && occupied == 0) {
+                        val deadZone = t.zone
+                        val deadCol = c
+                        val deadRow = r
                         t.level = 0
                         t.maturity = 0
                         t.distress = 0
                         preMergeReset(t)
+                        events.add(CityEvent.Died(deadZone, deadCol, deadRow))
                         continue
                     }
                     val upgradeChance = Config.UPGRADE_CHANCE +
@@ -890,6 +947,26 @@ class CityEngine(
         }
     }
 
+    /**
+     * A day counts as stable once the city is big enough, happy enough and
+     * paying its way; any bad day breaks the streak. Milestones are then
+     * checked and their cash bonus paid the moment they complete.
+     */
+    private fun updateProgression() {
+        val stable = population >= Config.STABLE_MIN_POPULATION &&
+            happiness >= Config.STABLE_MIN_HAPPINESS &&
+            netPerDay >= 0
+        stableDays = if (stable) stableDays + 1 else 0
+        for (milestone in Milestone.values()) {
+            if (milestone in completed) continue
+            if (milestoneValue(milestone) >= milestoneTarget(milestone)) {
+                completed.add(milestone)
+                funds += milestone.cash
+                events.add(CityEvent.MilestoneReached(milestone))
+            }
+        }
+    }
+
     private fun advanceDate() {
         day++
         if (day > Config.DAYS_PER_MONTH) {
@@ -944,6 +1021,72 @@ class CityEngine(
         }
     }
 
+    /**
+     * Cellular view of a tile: how many of its eight Moore neighbours are
+     * inhabited, zoned or built on. The three counts mirror the classic
+     * live/dead/empty neighbour tallies a cellular-automata player watches.
+     */
+    data class NeighborCounts(val developed: Int, val zoned: Int, val built: Int, val total: Int = 8)
+
+    fun neighborCounts(col: Int, row: Int): NeighborCounts {
+        var developed = 0
+        var zoned = 0
+        var built = 0
+        for (dr in -1..1) {
+            for (dc in -1..1) {
+                if (dc == 0 && dr == 0) continue
+                val t = tile(col + dc, row + dr) ?: continue
+                if (t.developed) developed++
+                if (t.zone != ZoneType.NONE) {
+                    zoned++
+                    built++
+                } else if (t.pipe || t.powerline) {
+                    built++
+                }
+            }
+        }
+        return NeighborCounts(developed, zoned, built)
+    }
+
+    /**
+     * Rough money this tile contributes each tick (a day): its own tax take
+     * minus the upkeep its structure costs. Negative means the tile is a drain.
+     */
+    fun incomePerTick(t: Tile): Float {
+        val tax = t.population * Config.TAX_PER_RESIDENT + t.jobs * Config.TAX_PER_JOB
+        val upkeep = when (t.zone) {
+            ZoneType.ROAD -> Config.UPKEEP_ROAD
+            ZoneType.HIGHWAY -> Config.UPKEEP_HIGHWAY
+            ZoneType.RAIL -> Config.UPKEEP_RAIL
+            ZoneType.PARK -> Config.UPKEEP_PARK
+            ZoneType.PLANT -> Config.UPKEEP_PLANT
+            ZoneType.WATERWORKS -> Config.UPKEEP_WATERWORKS
+            ZoneType.POLICE -> Config.UPKEEP_POLICE
+            ZoneType.FIRE -> Config.UPKEEP_FIRE
+            ZoneType.HOSPITAL -> Config.UPKEEP_HOSPITAL
+            ZoneType.STATION -> Config.UPKEEP_STATION
+            ZoneType.AIRPORT -> Config.UPKEEP_AIRPORT
+            ZoneType.RESIDENTIAL,
+            ZoneType.COMMERCIAL,
+            ZoneType.INDUSTRIAL -> if (t.level > 0) Config.UPKEEP_BUILDING else 0f
+            else -> 0f
+        } + (if (t.pipe) Config.UPKEEP_PIPE else 0f) +
+            (if (t.powerline) Config.UPKEEP_POWERLINE else 0f)
+        return tax - upkeep
+    }
+
+    /** A one-word summary of what a tile is doing right now. */
+    fun tileState(t: Tile): String = when {
+        t.terrain == Terrain.WATER && t.zone.isRoad -> "Bridge"
+        t.terrain == Terrain.WATER -> "Water"
+        t.merged && t.zone.isZone -> "${t.zone.label} block (L${t.level})"
+        t.developed -> "${t.zone.label} L${t.level} · ${t.population + t.jobs} inside"
+        t.zone.isZone -> "Vacant ${t.zone.label.lowercase()}"
+        t.zone != ZoneType.NONE -> t.zone.label
+        t.terrain == Terrain.FOREST -> "Forest"
+        else -> "Grass"
+    }
+
     private inline fun countTiles(predicate: (Tile) -> Boolean): Int {
         var n = 0
         for (r in 0 until rows) {
@@ -980,7 +1123,7 @@ class CityEngine(
 
     fun save(): String {
         val sb = StringBuilder(4096)
-        sb.append("CC4|")
+        sb.append("CC5|")
         sb.append(funds).append('|')
         sb.append(day).append('|')
         sb.append(month).append('|')
@@ -988,6 +1131,8 @@ class CityEngine(
         sb.append(String.format(java.util.Locale.US, "%.2f", happiness)).append('|')
         sb.append(String.format(java.util.Locale.US, "%.3f", pollution)).append('|')
         sb.append(seedValue).append('|')
+        sb.append(completed.joinToString(",") { it.name }).append('|')
+        sb.append(stableDays).append('|')
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 if (c != 0 || r != 0) sb.append(';')
@@ -1023,20 +1168,35 @@ class CityEngine(
         fun load(data: String?): CityEngine? {
             if (data.isNullOrBlank()) return null
             val parts = data.split('|')
-            if (parts.size != 9) return null
+            if (parts.size < 9) return null
             val version = parts[0]
             if (version != "CC1" && version != "CC2" && version != "CC3" &&
-                version != "CC4"
+                version != "CC4" && version != "CC5"
             ) {
                 return null
             }
             val mergedSaves = version != "CC1"
-            val layeredPipes = version == "CC3" || version == "CC4"
-            val layeredWires = version == "CC4"
+            val layeredPipes = version == "CC3" || version == "CC4" || version == "CC5"
+            val layeredWires = version == "CC4" || version == "CC5"
+            val progressive = version == "CC5"
+            if (progressive && parts.size != 11) return null
             return try {
                 val w = Config.COLS
                 val h = Config.ROWS
                 val engine = CityEngine(w, h, parts[7].toLongOrNull() ?: 1L)
+                // Pre-progression saves never had locked tools; keep them all open.
+                engine.legacyUnlockedAll = !progressive
+                val tilePart = parts[if (progressive) 10 else 8]
+                if (progressive) {
+                    if (parts[8].isNotEmpty()) {
+                        for (name in parts[8].split(',')) {
+                            val milestone = Milestone.values().firstOrNull { it.name == name }
+                                ?: return null
+                            engine.completed.add(milestone)
+                        }
+                    }
+                    engine.stableDays = parts[9].toInt().coerceAtLeast(0)
+                }
                 engine.funds = parts[1].toInt()
                 engine.day = parts[2].toInt().coerceIn(1, Config.DAYS_PER_MONTH)
                 engine.month = parts[3].toInt().coerceIn(1, 12)
@@ -1046,7 +1206,7 @@ class CityEngine(
                 if (!happy.isFinite() || !dirty.isFinite()) return null
                 engine.happiness = happy.coerceIn(0f, 100f)
                 engine.pollution = dirty.coerceIn(0f, 1f)
-                val tiles = parts[8].split(';')
+                val tiles = tilePart.split(';')
                 if (tiles.size != w * h) return null
                 var pop = 0
                 var job = 0

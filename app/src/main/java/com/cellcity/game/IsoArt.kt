@@ -78,6 +78,46 @@ class CityRenderer(private val density: Float) {
     private val cars = ArrayList<Car>()
     private val trains = ArrayList<Car>()
 
+    // --- per-tile mini-animations (keyed by row * cols + col) --------------
+    private val birthAnims = HashMap<Int, Float>()   // 0..1 progress of a grow pop
+    private val deathAnims = HashMap<Int, Float>()   // 0..1 progress of a fade
+    private val colsHint = Config.COLS
+
+    /** A newly grown/upgraded cell pops into view. */
+    fun flashBirth(col: Int, row: Int) {
+        birthAnims[row * colsHint + col] = 0f
+    }
+
+    /** A dying cell sinks away with a puff. */
+    fun flashDeath(col: Int, row: Int) {
+        deathAnims[row * colsHint + col] = 0f
+    }
+
+    /** Advance the short-lived per-tile animations; call once per frame. */
+    fun updateAnimations(dt: Float) {
+        if (birthAnims.isNotEmpty()) {
+            val done = ArrayList<Int>()
+            for ((k, v) in birthAnims) {
+                val n = v + dt * 1.8f
+                if (n >= 1f) done.add(k) else birthAnims[k] = n
+            }
+            done.forEach { birthAnims.remove(it) }
+        }
+        if (deathAnims.isNotEmpty()) {
+            val done = ArrayList<Int>()
+            for ((k, v) in deathAnims) {
+                val n = v + dt * 1.5f
+                if (n >= 1f) done.add(k) else deathAnims[k] = n
+            }
+            done.forEach { deathAnims.remove(it) }
+        }
+    }
+
+    fun clearAnimations() {
+        birthAnims.clear()
+        deathAnims.clear()
+    }
+
     private class Car(
         var col: Int,
         var row: Int,
@@ -463,6 +503,33 @@ class CityRenderer(private val density: Float) {
         val bridge = tile.zone.isRoad && tile.terrain == Terrain.WATER
         val inkW = max(1.1f, 1.5f * u)
 
+        // per-tile mini-animations: a new cell pops up, a dying cell sinks away
+        val animKey = row * colsHint + col
+        val birth = birthAnims[animKey]
+        val death = deathAnims[animKey]
+        var saved = false
+        if (birth != null) {
+            val eased = 0.6f + 0.4f * (1f - (1f - birth) * (1f - birth)) + 0.18f * sin(birth * PI).toFloat()
+            canvas.save()
+            canvas.translate(cx, cy)
+            canvas.scale(eased, eased)
+            canvas.translate(-cx, -cy)
+            saved = true
+        } else if (death != null) {
+            val eased = 1f - death * 0.55f
+            canvas.save()
+            canvas.translate(cx, cy)
+            canvas.scale(eased, eased)
+            canvas.translate(-cx, -cy)
+            saved = true
+        }
+        val animAlpha = if (death != null) (255 * (1f - death)).toInt().coerceIn(40, 255) else 255
+        if (animAlpha < 255) {
+            fill.alpha = animAlpha
+            line.alpha = animAlpha
+            zoneText.alpha = animAlpha
+        }
+
         if (tile.terrain == Terrain.WATER) {
             drawWater(canvas, cx, cy, hw, hh, u, col, row, time)
         } else {
@@ -538,6 +605,47 @@ class CityRenderer(private val density: Float) {
                 drawBadge(canvas, cx + hw * 0.42f - i * 10.5f * u, cy - hh * 0.25f, u, badges[i])
             }
         }
+
+        // a growing cell gives off a quick sparkle ring
+        if (birth != null) {
+            val ringR = (hw * (0.5f + birth * 0.7f))
+            line.color = withAlpha(AMBER, ((1f - birth) * 200).toInt())
+            line.strokeWidth = 2.4f * u
+            canvas.drawOval(
+                cx - ringR, cy - ringR * 0.5f, cx + ringR, cy + ringR * 0.5f, line
+            )
+            line.color = withAlpha(CREAM, ((1f - birth) * 160).toInt())
+            line.strokeWidth = 1.4f * u
+            canvas.drawOval(
+                cx - ringR * 1.3f, cy - ringR * 0.65f, cx + ringR * 1.3f, cy + ringR * 0.65f, line
+            )
+        }
+        // a dying cell rises as a little grey puff
+        if (death != null) {
+            val puffY = cy - hh * (0.4f + death * 1.6f)
+            val puffR = (2.2f + death * 3.5f) * u
+            fill.color = withAlpha(0xFFB9B7A9.toInt(), ((1f - death) * 150).toInt())
+            canvas.drawCircle(cx, puffY, puffR, fill)
+            canvas.drawCircle(cx - puffR * 1.4f, puffY + puffR * 0.6f, puffR * 0.7f, fill)
+            canvas.drawCircle(cx + puffR * 1.4f, puffY + puffR * 0.6f, puffR * 0.7f, fill)
+        }
+
+        // an active, powered cell breathes a soft glow ring
+        if (tile.developed && tile.powered && birth == null && death == null) {
+            val phase = (sin(time * 1.6f + (col + row) * 0.9f) + 1f) * 0.5f
+            val glow = withAlpha(AMBER, (14 + phase * 16).toInt())
+            diamondPath(cx, cy, hw * 0.86f, hh * 0.86f)
+            line.color = glow
+            line.strokeWidth = (1.4f + phase * 1.2f) * u
+            canvas.drawPath(path, line)
+        }
+
+        if (animAlpha < 255) {
+            fill.alpha = 255
+            line.alpha = 255
+            zoneText.alpha = 255
+        }
+        if (saved) canvas.restore()
     }
 
     private fun grassTone(col: Int, row: Int): Int =

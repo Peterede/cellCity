@@ -156,8 +156,47 @@ enum class BuildResult(val message: String) {
     WATER("Can't build on water"),
     NO_ROAD("Needs a road beside it"),
     NO_RAIL("Needs rail beside it"),
+    LOCKED("Locked - reach the next milestone"),
     CANNOT("Can't build there"),
     OUT_OF_BOUNDS("")
+}
+
+/**
+ * A progression goal. Completing one pays a cash bonus and may unlock tools
+ * that were unavailable when the city was founded. Order matters: this is the
+ * order they are offered and drawn in the goals panel.
+ */
+enum class Milestone(
+    val title: String,
+    val detail: String,
+    val cash: Int,
+    val unlocks: List<Tool>
+) {
+    FIRST_HOME("First Residents", "Reach 10 population", 250, listOf(Tool.RAIL)),
+    HAMLET("Hamlet", "Reach 100 population", 500, listOf(Tool.STATION, Tool.HIGHWAY)),
+    STEADY("Steady Hands", "30 stable days in a row", 750, listOf(Tool.POLICE, Tool.FIRE)),
+    TOWN("Town", "Reach 500 population", 1_000, listOf(Tool.HOSPITAL)),
+    SKYLINE("Skyline", "Merge four lots into one large building", 1_500, listOf(Tool.AIRPORT)),
+    CITY("City", "Reach 1,000 population", 3_000, emptyList()),
+    STABLE_CYCLE("Stable Cycle", "100 stable days in a row", 5_000, emptyList()),
+    METROPOLIS("Metropolis", "Reach 5,000 population", 10_000, emptyList());
+
+    companion object {
+        /** The tools a fresh city starts with; every other tool arrives with a milestone. */
+        val START_TOOLS = setOf(
+            Tool.ROAD,
+            Tool.RESIDENTIAL,
+            Tool.COMMERCIAL,
+            Tool.INDUSTRIAL,
+            Tool.PARK,
+            Tool.PLANT,
+            Tool.WATER,
+            Tool.PIPE,
+            Tool.POWERLINE,
+            Tool.BULLDOZE,
+            Tool.PAN
+        )
+    }
 }
 
 /** Things the UI may want to announce. */
@@ -173,6 +212,11 @@ sealed class CityEvent {
     ) : CityEvent()
 
     data class Merged(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
+
+    /** A building emptied out and was abandoned: the cell "died". */
+    data class Died(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
+
+    data class MilestoneReached(val milestone: Milestone) : CityEvent()
 
     data class Notice(val text: String) : CityEvent()
 }

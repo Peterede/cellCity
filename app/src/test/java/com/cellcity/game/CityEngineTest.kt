@@ -9,7 +9,9 @@ import kotlin.math.roundToInt
 
 class CityEngineTest {
 
-    private fun city(seed: Long = 7L) = CityEngine(seed = seed)
+    private fun city(seed: Long = 7L) = CityEngine(seed = seed, enforceUnlocks = false)
+
+    private fun progressiveCity(seed: Long = 7L) = CityEngine(seed = seed)
 
     @Test
     fun landscapeHasWaterForestAndAClearStart() {
@@ -550,7 +552,7 @@ class CityEngineTest {
 
         // rewrite the CC3 save the way the previous version stored it: pipes as a zone
         val parts = e.save().split('|')
-        val tiles = parts[8].split(';').joinToString(";") { tile ->
+        val tiles = parts[10].split(';').joinToString(";") { tile ->
             val f = tile.split(',')
             val zone = if (f[11].toInt() != 0) ZoneType.PIPE.ordinal else f[1].toInt()
             (listOf(f[0], zone.toString()) + f.subList(2, 11)).joinToString(",")
@@ -562,6 +564,115 @@ class CityEngineTest {
         assertTrue(loaded!!.tile(c, r)!!.pipe)
         assertEquals(ZoneType.NONE, loaded.tile(c, r)!!.zone)
         assertEquals(1, loaded.pipeCount)
+    }
+
+    @Test
+    fun aFreshCityStartsWithOnlyTheBasicTools() {
+        val e = progressiveCity()
+        assertTrue(e.isUnlocked(Tool.ROAD))
+        assertTrue(e.isUnlocked(Tool.RESIDENTIAL))
+        assertTrue(e.isUnlocked(Tool.PLANT))
+        assertTrue(e.isUnlocked(Tool.BULLDOZE))
+        assertEquals(false, e.isUnlocked(Tool.RAIL))
+        assertEquals(false, e.isUnlocked(Tool.AIRPORT))
+        assertEquals(false, e.isUnlocked(Tool.POLICE))
+
+        val (c, r) = findTile(e) { it.terrain != Terrain.WATER }!!
+        assertEquals(BuildResult.LOCKED, e.build(Tool.RAIL, c, r))
+        assertEquals(BuildResult.LOCKED, e.build(Tool.POLICE, c, r))
+        assertEquals(BuildResult.LOCKED, e.build(Tool.AIRPORT, c, r))
+        // a non-validating engine still lets the tests place anything
+        assertEquals(BuildResult.OK, city().build(Tool.RAIL, c, r))
+    }
+
+    @Test
+    fun reachingPopulationUnlocksToolsAndPaysABonus() {
+        val e = progressiveCity()
+        assertEquals(Milestone.FIRST_HOME, e.nextMilestone())
+
+        // First Residents needs 10 people; force a population with a small farm of homes
+        buildBasicTown(e)
+        var bonusSeen = 0
+        var reached: Milestone? = null
+        repeat(900) {
+            e.tick()
+            for (event in e.drainEvents()) {
+                if (event is CityEvent.MilestoneReached && event.milestone == Milestone.FIRST_HOME) {
+                    reached = event.milestone
+                    bonusSeen += event.milestone.cash
+                }
+            }
+        }
+        assertTrue("the city grew", e.population >= Config.MILESTONE_POP_FIRST_HOME)
+        assertNotNull("First Residents fired", reached)
+        assertTrue("the cash bonus was paid", bonusSeen > 0)
+        assertTrue("rail unlocked", e.isUnlocked(Tool.RAIL))
+        assertTrue(Milestone.FIRST_HOME in e.completedMilestones)
+        assertTrue("the bigger Hamlets goal also fell", Milestone.HAMLET in e.completedMilestones)
+        assertEquals(Milestone.TOWN, e.nextMilestone())
+    }
+
+    @Test
+    fun milestoneProgressTracksPopulationAndStability() {
+        val e = progressiveCity()
+        assertEquals(e.population, e.milestoneValue(Milestone.CITY))
+        assertEquals(Config.MILESTONE_POP_CITY, e.milestoneTarget(Milestone.CITY))
+        assertEquals(e.stableDays, e.milestoneValue(Milestone.STABLE_CYCLE))
+        assertEquals(Config.MILESTONE_STABLE_CYCLE_DAYS, e.milestoneTarget(Milestone.STABLE_CYCLE))
+        assertEquals(0, e.milestoneValue(Milestone.SKYLINE))
+
+        // a settled, happy, solvent town builds a stable streak
+        buildBasicTown(e)
+        repeat(600) { e.tick() }
+        assertTrue("the streak builds when happy and solvent", e.stableDays > 0)
+    }
+
+    @Test
+    fun goalsSurviveASaveAndLoad() {
+        val e = progressiveCity()
+        buildBasicTown(e)
+        repeat(900) { e.tick() }
+
+        val data = e.save()
+        val loaded = CityEngine.load(data)
+        assertNotNull(loaded)
+        assertEquals(e.completedMilestones, loaded!!.completedMilestones)
+        assertEquals(e.stableDays, loaded.stableDays)
+        assertEquals(e.population, loaded.population)
+        for (milestone in e.completedMilestones) {
+            for (tool in milestone.unlocks) {
+                assertTrue("$tool stays unlocked after loading", loaded.isUnlocked(tool))
+            }
+        }
+        assertEquals(e.nextMilestone(), loaded.nextMilestone())
+    }
+
+    @Test
+    fun oldSavesKeepEveryToolUnlocked() {
+        val e = city()
+        val parts = e.save().split('|')
+        // rewrite as a CC4 save: drop the goals and stable-days fields
+        val cc4 = (listOf("CC4") + parts.subList(1, 8) + listOf(parts[10])).joinToString("|")
+        val loaded = CityEngine.load(cc4)
+        assertNotNull(loaded)
+        assertEquals(true, loaded!!.isUnlocked(Tool.RAIL))
+        assertEquals(true, loaded.isUnlocked(Tool.AIRPORT))
+        assertEquals(true, loaded.isUnlocked(Tool.POLICE))
+    }
+
+    /** A little grid of powered, watered, road-connected lots to grow a city. */
+    private fun buildBasicTown(e: CityEngine) {
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        for (c in 9..15) e.build(Tool.ROAD, c, 11)
+        for (r in 12..14) e.build(Tool.ROAD, 9, r)
+        for (c in 10..15) {
+            e.build(Tool.RESIDENTIAL, c, 10)
+            e.build(Tool.COMMERCIAL, c, 12)
+        }
+        for (r in 12..14) e.build(Tool.INDUSTRIAL, 10, r)
+        e.build(Tool.PARK, 9, 10)
+        e.build(Tool.PARK, 9, 15)
     }
 
     /** First horizontal run of dry tiles, so pipe runs never hit the river. */

@@ -60,4 +60,9 @@ class MainActivity : Activity() {
         super.onPause()
         gameView.onDeactivated()
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (::gameView.isInitialized) gameView.onReleased()
+    }
 }
