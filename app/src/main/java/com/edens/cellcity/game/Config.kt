@@ -1,4 +1,4 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 /** All tuning constants for Cell City. Pure logic, no Android dependencies. */
 object Config {
@@ -37,6 +37,10 @@ object Config {
     const val COST_FIRE = 800
     const val COST_HOSPITAL = 1200
     const val COST_STATION = 700
+    /** A tunnel is a buried layer: cheaper than a street, but it needs stations to be useful. */
+    const val COST_SUBWAY = 55
+    const val COST_SUBWAY_WATER = 160
+    const val COST_SUBWAY_STATION = 650
     /** One airport occupies a 2x2 block and is charged once. */
     const val COST_AIRPORT = 6000
     const val BULLDOZE_REFUND = 0.25f
@@ -51,6 +55,8 @@ object Config {
     const val UPKEEP_PIPE = 0.03f
     const val UPKEEP_POWERLINE = 0.02f
     const val UPKEEP_STATION = 1.30f
+    const val UPKEEP_SUBWAY = 0.06f
+    const val UPKEEP_SUBWAY_STATION = 1.10f
     const val UPKEEP_PARK = 0.40f
     const val UPKEEP_PLANT = 3.00f
     const val UPKEEP_WATERWORKS = 1.20f
@@ -82,6 +88,8 @@ object Config {
     const val WATER_RANGE = 6
     /** A station spreads transit access to lots this far from its door. */
     const val STATION_RANGE = 5
+    /** Subway stations are underground platforms: riders walk a little further to reach one. */
+    const val SUBWAY_RANGE = 6
     const val POLICE_RANGE = 7
     const val FIRE_RANGE = 6
     const val HOSPITAL_RANGE = 7
@@ -106,6 +114,28 @@ object Config {
     const val MILESTONE_STEADY_DAYS = 30
     const val MILESTONE_STABLE_CYCLE_DAYS = 100
 
+    // --- disasters ---------------------------------------------------------
+    /** Chance per day that a building with no fire cover catches fire. */
+    const val FIRE_CHANCE = 0.004f
+    /** Chance per day that a building with no police cover is hit by crime. */
+    const val CRIME_CHANCE = 0.012f
+    /** Days a fire burns with no crew before the building is gutted. */
+    const val FIRE_BURN_DAYS = 4
+    /** Days a crime mark lingers while police cannot reach the building. */
+    const val CRIME_DAYS = 12
+    /** The city never has more fires than this burning at once. */
+    const val MAX_ACTIVE_FIRES = 3
+    /** Buildings hit by crime before the city is warned. */
+    const val CRIME_WAVE = 5
+
+    // --- taxes -------------------------------------------------------------
+    /** The tax rate the city starts with, in percent of a citizen's income. */
+    const val TAX_DEFAULT = 10
+    const val TAX_MIN = 0
+    const val TAX_MAX = 25
+    /** Each point of tax above the default costs this much happiness (and below it buys some). */
+    const val TAX_HAPPINESS_WEIGHT = 1.1f
+
     // --- demand ------------------------------------------------------------
     const val DEMAND_BASE_R = 0.62f
     const val DEMAND_BASE_C = 0.34f
@@ -124,4 +154,6 @@ object Config {
     const val LEAF = 0xFF69C46D.toInt()
     const val SKY_BLUE = 0xFF5AB6E8.toInt()
     const val BRASS = 0xFFD7A54A.toInt()
+    /** Deep tunnel teal used for subway lines and station signs. */
+    const val TUNNEL = 0xFF2E6F73.toInt()
 }

@@ -1,10 +1,12 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 class CityEngineTest {
@@ -179,8 +181,15 @@ class CityEngineTest {
                 assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, c, r))
             }
         }
+        // keep the block served: an uncovered block would burn down mid-test
+        assertEquals(BuildResult.OK, e.build(Tool.FIRE, 13, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.POLICE, 14, 10))
 
-        repeat(700) { e.tick() }
+        // stop as soon as the block forms; the city is left running for 700 days
+        for (i in 0 until 700) {
+            e.tick()
+            if (e.tile(10, 11)!!.merged) break
+        }
 
         val block = e.tile(10, 11)!!
         assertTrue("all four lots reached level 2", block.level >= Config.MERGE_LEVEL)
@@ -275,6 +284,92 @@ class CityEngineTest {
         val expected = afterBuild + (Config.COST_PARK * Config.BULLDOZE_REFUND).toInt()
         assertTrue("refund was paid", e.funds >= afterBuild)
         assertTrue("refund is a quarter (rounded)", e.funds <= expected + 1)
+    }
+
+    @Test
+    fun undoPutsBackTheLastDragAndItsCost() {
+        val e = city()
+        val before = e.funds
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 12, 12))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 13, 12))
+        assertTrue("a drag is one undo step", e.endAction())
+        assertTrue(e.canUndo)
+        assertEquals(before - 2 * Config.COST_ROAD, e.funds)
+
+        assertEquals("build", e.undo())
+        assertEquals(ZoneType.NONE, e.tile(12, 12)!!.zone)
+        assertEquals(ZoneType.NONE, e.tile(13, 12)!!.zone)
+        assertEquals("both roads are refunded", before, e.funds)
+        assertEquals(false, e.canUndo)
+        assertNull(e.undo())
+        assertEquals("an empty action is not undoable", false, e.endAction())
+    }
+
+    @Test
+    fun undoRestoresABulldozedBuildingAndItsPeople() {
+        val e = city(109)
+        val (c, r) = findDryRun(e, 2)!!
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, c, r))
+        val home = e.tile(c, r)!!
+        home.level = 2
+        home.population = 18
+        home.jobs = 2
+        val before = e.funds
+
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.BULLDOZE, c, r))
+        assertTrue(e.endAction())
+        assertTrue("bulldozing pays a refund", e.funds > before)
+        assertEquals(ZoneType.NONE, home.zone)
+
+        assertEquals("bulldoze", e.undo())
+        assertEquals(ZoneType.RESIDENTIAL, home.zone)
+        assertEquals(2, home.level)
+        assertEquals(18, home.population)
+        assertEquals("the population is re-tallied", 18, e.population)
+        assertEquals("the refund is taken back", before, e.funds)
+    }
+
+    @Test
+    fun undoClearsAWholeAirportBlock() {
+        val e = city(5)
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 10))
+        val before = e.funds
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.AIRPORT, 11, 10))
+        assertTrue(e.endAction())
+        assertEquals(1, e.airportCount)
+        assertEquals(before - Config.COST_AIRPORT, e.funds)
+
+        assertEquals("build", e.undo())
+        for (r in 10..11) {
+            for (c in 11..12) {
+                assertEquals(ZoneType.NONE, e.tile(c, r)!!.zone)
+                assertEquals(false, e.tile(c, r)!!.merged)
+            }
+        }
+        assertEquals(0, e.airportCount)
+        assertEquals(before, e.funds)
+    }
+
+    @Test
+    fun undoStepsBackThroughRecentActions() {
+        val e = city(113)
+        val (c, r) = findDryRun(e, 2)!!
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.PARK, c, r))
+        assertTrue(e.endAction())
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.PARK, c + 1, r))
+        assertTrue(e.endAction())
+
+        assertEquals("build", e.undo())
+        assertEquals(ZoneType.NONE, e.tile(c + 1, r)!!.zone)
+        assertEquals(ZoneType.PARK, e.tile(c, r)!!.zone)
+        assertEquals("build", e.undo())
+        assertEquals(ZoneType.NONE, e.tile(c, r)!!.zone)
+        assertEquals(false, e.canUndo)
     }
 
     @Test
@@ -550,9 +645,9 @@ class CityEngineTest {
         val (c, r) = findDryRun(e, 2)!!
         assertEquals(BuildResult.OK, e.build(Tool.PIPE, c, r))
 
-        // rewrite the CC3 save the way the previous version stored it: pipes as a zone
+        // rewrite the CC6 save the way the previous version stored it: pipes as a zone
         val parts = e.save().split('|')
-        val tiles = parts[10].split(';').joinToString(";") { tile ->
+        val tiles = parts[11].split(';').joinToString(";") { tile ->
             val f = tile.split(',')
             val zone = if (f[11].toInt() != 0) ZoneType.PIPE.ordinal else f[1].toInt()
             (listOf(f[0], zone.toString()) + f.subList(2, 11)).joinToString(",")
@@ -648,16 +743,488 @@ class CityEngineTest {
     }
 
     @Test
+    fun infoToolIsFreeAndNeverBuilds() {
+        val e = progressiveCity()
+        assertTrue("the info tool is always available", e.isUnlocked(Tool.INFO))
+        assertEquals(0, e.baseCost(Tool.INFO))
+        val (c, r) = findDryRun(e, 2)!!
+        val before = e.funds
+        assertEquals(BuildResult.OK, e.build(Tool.INFO, c, r))
+        assertEquals("inspecting does not build", ZoneType.NONE, e.tile(c, r)!!.zone)
+        assertEquals("inspecting is free", before, e.funds)
+    }
+
+    @Test
+    fun inspectorNamesWhatAVacantLotNeeds() {
+        val e = city(97)
+        val (c, r) = findDryRun(e, 3)!!
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, c, r))
+        val report = CityInspector.report(e, c, r)!!
+        assertTrue(report.title.contains("residential", ignoreCase = true))
+        assertTrue(report.needs.any { it.label == "Road access" && it.state == NeedState.MISSING })
+        assertTrue(report.needs.any { it.label == "Power" && it.state == NeedState.MISSING })
+        assertTrue(report.needs.any { it.label == "Water" && it.state == NeedState.MISSING })
+        assertTrue(report.broken)
+        assertTrue("the advice names the road", report.advice.contains("road", ignoreCase = true))
+    }
+
+    @Test
+    fun inspectorUpdatesWhenTheServicesArePulled() {
+        val e = city(7)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(240) { e.tick() }
+
+        val healthy = CityInspector.report(e, 11, 11)!!
+        assertTrue(healthy.needs.any { it.label == "Power" && it.state == NeedState.MET })
+        assertTrue(healthy.needs.any { it.label == "Water" && it.state == NeedState.MET })
+        assertTrue(healthy.facts.any { it.label == "Level" })
+        assertTrue(healthy.facts.any { it.label == "Inside" })
+        assertEquals(false, healthy.broken)
+
+        assertEquals(BuildResult.OK, e.build(Tool.BULLDOZE, 10, 10))
+        val dark = CityInspector.report(e, 11, 11)!!
+        assertTrue(dark.needs.any { it.label == "Power" && it.state == NeedState.MISSING })
+        assertTrue(dark.broken)
+    }
+
+    @Test
+    fun inspectorExplainsRoadsRailTunnelsAndWater() {
+        val e = city(101)
+        val (c, r) = findDryBlock(e, 3, 3)!!
+
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, c, r))
+        val road = CityInspector.report(e, c, r)!!
+        assertTrue("a lone road is called a stub", road.advice.contains("stub", ignoreCase = true))
+
+        assertEquals(BuildResult.OK, e.build(Tool.RAIL, c, r + 1))
+        val rail = CityInspector.report(e, c, r + 1)!!
+        assertTrue(rail.needs.any { it.label == "Part of a line" && it.state == NeedState.MISSING })
+        assertEquals(BuildResult.OK, e.build(Tool.RAIL, c + 1, r + 1))
+        val line = CityInspector.report(e, c, r + 1)!!
+        assertTrue(line.needs.any { it.label == "Part of a line" && it.state == NeedState.MET })
+
+        val emptyByRoad = CityInspector.report(e, c + 1, r)!!
+        assertTrue(
+            "empty land beside a road suggests zoning",
+            emptyByRoad.advice.contains("zone", ignoreCase = true)
+        )
+
+        val (wc, wr) = findTile(e) { it.terrain == Terrain.WATER }!!
+        val water = CityInspector.report(e, wc, wr)!!
+        assertTrue(water.needs.isEmpty())
+        assertTrue("water explains bridges and tunnels", water.advice.contains("bridge", true))
+    }
+
+    @Test
+    fun inspectorExplainsSubwayStubsAndPlatforms() {
+        val e = city(103)
+        val (c, r) = findDryBlock(e, 3, 3)!!
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c, r))
+        val stub = CityInspector.report(e, c, r)!!
+        assertTrue(stub.advice.contains("stub", ignoreCase = true))
+
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c + 1, r))
+        val line = CityInspector.report(e, c, r)!!
+        assertTrue(line.needs.any { it.label == "Part of a line" && it.state == NeedState.MET })
+        assertTrue("it asks for a station", line.advice.contains("SUB STN", true))
+
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY_STATION, c, r + 1))
+        val platform = CityInspector.report(e, c, r + 1)!!
+        assertTrue(platform.needs.any { it.label == "Tunnel beside it" && it.state == NeedState.MET })
+        assertEquals(false, platform.broken)
+    }
+
+    @Test
+    fun firesOnlyStartWhereNoFireCrewReaches() {
+        // a covered home stays safe
+        val safe = city(7)
+        assertEquals(BuildResult.OK, safe.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, safe.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, safe.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, safe.build(Tool.RESIDENTIAL, 11, 11))
+        assertEquals(BuildResult.OK, safe.build(Tool.FIRE, 11, 12))
+        var safeFires = 0
+        repeat(500) {
+            safe.tick()
+            for (event in safe.drainEvents()) {
+                if (event is CityEvent.FireStarted) safeFires++
+            }
+        }
+        assertTrue("the crew reaches the home", safe.tile(11, 11)!!.fireCovered)
+        assertEquals("a covered city does not burn", 0, safeFires)
+        assertEquals(0, safe.activeFires)
+
+        // the same home with no crew is at risk, and nobody puts it out
+        val risky = city(7)
+        assertEquals(BuildResult.OK, risky.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, risky.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, risky.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, risky.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(240) { risky.tick() }
+        assertTrue("a home exists to burn", risky.tile(11, 11)!!.developed)
+
+        var started = false
+        var destroyed = false
+        var warned = false
+        repeat(900) {
+            risky.tick()
+            for (event in risky.drainEvents()) {
+                when (event) {
+                    is CityEvent.FireStarted -> started = true
+                    is CityEvent.FireDestroyed -> destroyed = true
+                    else -> Unit
+                }
+            }
+            if (!warned) {
+                warned = CityAdvisor.report(risky).issues.any { it.title == "Buildings are on fire" }
+            }
+        }
+        assertTrue("an uncovered home catches fire", started)
+        assertTrue("without a crew the fire guts it", destroyed)
+        assertTrue("the advisor warns about fires", warned)
+    }
+
+    @Test
+    fun aFireStationPutsOutAnActiveFire() {
+        val e = city(11)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(240) { e.tick() }
+
+        var col = -1
+        var row = -1
+        for (i in 0 until 900) {
+            e.tick()
+            for (event in e.drainEvents()) {
+                if (event is CityEvent.FireStarted) {
+                    col = event.col
+                    row = event.row
+                }
+            }
+            if (col >= 0 && e.tile(col, row)!!.fire > 0) break
+        }
+        assertTrue("a fire is burning", col >= 0 && e.tile(col, row)!!.fire > 0)
+
+        val burning = CityInspector.report(e, col, row)!!
+        assertTrue("the info tool calls out the fire", burning.advice.contains("on fire", true))
+        assertTrue(burning.broken)
+
+        var station: Pair<Int, Int>? = null
+        for (r in max(0, row - 2)..min(e.rows - 1, row + 2)) {
+            for (c in max(0, col - 2)..min(e.cols - 1, col + 2)) {
+                if (station == null && e.canBuild(Tool.FIRE, c, r) == BuildResult.OK) {
+                    station = c to r
+                }
+            }
+        }
+        assertNotNull("there is room for a fire station", station)
+        assertEquals(BuildResult.OK, e.build(Tool.FIRE, station!!.first, station.second))
+        e.tick()
+        var out = false
+        for (event in e.drainEvents()) if (event is CityEvent.FireOut) out = true
+        assertEquals("the crew puts the fire out", 0, e.tile(col, row)!!.fire)
+        assertTrue("the crew's arrival is announced", out)
+    }
+
+    @Test
+    fun crimeFollowsMissingPoliceAndClearsWithCover() {
+        val e = city(13)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(240) { e.tick() }
+        assertTrue(e.tile(11, 11)!!.developed)
+        assertTrue("the home has no police cover", e.crimeRiskLots > 0)
+
+        var warned = false
+        var reportStage = 0
+        var reportCol = -1
+        var reportRow = -1
+        var crimeCol = -1
+        var crimeRow = -1
+        for (i in 0 until 900) {
+            e.tick()
+            for (event in e.drainEvents()) {
+                if (event is CityEvent.CrimeReported) {
+                    warned = event.text.contains("crime", true) && event.count > 0
+                    reportStage = max(reportStage, event.stage)
+                    if (event.col >= 0) {
+                        reportCol = event.col
+                        reportRow = event.row
+                    }
+                }
+            }
+            if (e.activeCrime > 0) {
+                for (r in 0 until e.rows) {
+                    for (c in 0 until e.cols) {
+                        if (e.tile(c, r)!!.crime > 0) {
+                            crimeCol = c
+                            crimeRow = r
+                        }
+                    }
+                }
+                break
+            }
+        }
+        assertTrue("unpoliced homes attract crime", crimeCol >= 0)
+        assertTrue("the city is warned", warned)
+        assertTrue("the report names the stage", reportStage >= 1)
+        assertTrue("the report points at a crime scene", reportCol >= 0 && reportRow >= 0)
+        assertTrue("that cell really is hit", e.tile(reportCol, reportRow)!!.crime > 0)
+
+        val report = CityInspector.report(e, crimeCol, crimeRow)!!
+        assertTrue("the info tool names the crime", report.advice.contains("crime", true))
+
+        var station: Pair<Int, Int>? = null
+        for (r in max(0, crimeRow - 2)..min(e.rows - 1, crimeRow + 2)) {
+            for (c in max(0, crimeCol - 2)..min(e.cols - 1, crimeCol + 2)) {
+                if (station == null && e.canBuild(Tool.POLICE, c, r) == BuildResult.OK) {
+                    station = c to r
+                }
+            }
+        }
+        assertNotNull("there is room for a police station", station)
+        assertEquals(BuildResult.OK, e.build(Tool.POLICE, station!!.first, station.second))
+        repeat(6) { e.tick() }
+        assertEquals("police clear the crime mark", 0, e.activeCrime)
+    }
+
+    @Test
+    fun disastersWaitUntilTheFireAndPoliceToolsAreEarned() {
+        val e = progressiveCity()
+        assertTrue("fire and police start locked", !e.isUnlocked(Tool.FIRE) && !e.isUnlocked(Tool.POLICE))
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+
+        var incidents = 0
+        repeat(400) {
+            e.tick()
+            for (event in e.drainEvents()) {
+                if (event is CityEvent.FireStarted) incidents++
+                if (event is CityEvent.CrimeReported) incidents++
+            }
+        }
+        assertTrue("a home was built to be at risk", e.tile(11, 11)!!.developed)
+        assertEquals("no disasters before the services are earned", 0, incidents)
+    }
+
+    @Test
+    fun fireAndCrimeSurviveASave() {
+        val e = city(19)
+        val parts = e.save().split('|')
+        assertEquals("CC7", parts[0])
+
+        // graft a fire and a crime mark onto the first tile
+        val tiles = parts[11].split(';').toMutableList()
+        val fields = tiles[0].split(',').toMutableList()
+        fields[14] = "3"
+        fields[15] = "7"
+        tiles[0] = fields.joinToString(",")
+        val cc7 = (listOf("CC7") + parts.subList(1, 11) + listOf(tiles.joinToString(";")))
+            .joinToString("|")
+        val loaded = CityEngine.load(cc7)
+        assertNotNull("the save loads", loaded)
+        assertEquals(3, loaded!!.tile(0, 0)!!.fire)
+        assertEquals(7, loaded.tile(0, 0)!!.crime)
+        assertEquals(1, loaded.activeFires)
+        assertEquals(1, loaded.activeCrime)
+
+        // a CC6 save has no disaster fields and loads clean
+        val cc6Tiles = parts[11].split(';').joinToString(";") { tile ->
+            tile.split(',').take(14).joinToString(",")
+        }
+        val cc6 = (listOf("CC6") + parts.subList(1, 11) + listOf(cc6Tiles)).joinToString("|")
+        val old = CityEngine.load(cc6)
+        assertNotNull("CC6 still loads", old)
+        assertEquals(0, old!!.tile(0, 0)!!.fire)
+        assertEquals(0, old.activeCrime)
+    }
+
+    @Test
+    fun cc5SavesLoadWithTheDefaultTaxAndNoTunnels() {
+        val e = city(37)
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, 8, 8))
+        e.setTaxRate(21)
+
+        // strip the CC6-only fields: the tax rate before the tiles
+        val parts = e.save().split('|')
+        assertEquals("CC7", parts[0])
+        val cc5 = (listOf("CC5") + parts.subList(1, 10) + listOf(parts[11])).joinToString("|")
+
+        val loaded = CityEngine.load(cc5)
+        assertNotNull("a save from the previous version still loads", loaded)
+        assertEquals("old saves fall back to the default rate", Config.TAX_DEFAULT, loaded!!.taxRate)
+        assertEquals("no tunnels existed before CC6", 0, loaded.subwayCount)
+        assertEquals(e.population, loaded.population)
+        assertEquals(e.day, loaded.day)
+    }
+
+    @Test
     fun oldSavesKeepEveryToolUnlocked() {
         val e = city()
         val parts = e.save().split('|')
         // rewrite as a CC4 save: drop the goals and stable-days fields
-        val cc4 = (listOf("CC4") + parts.subList(1, 8) + listOf(parts[10])).joinToString("|")
+        val cc4 = (listOf("CC4") + parts.subList(1, 8) + listOf(parts[11])).joinToString("|")
         val loaded = CityEngine.load(cc4)
         assertNotNull(loaded)
         assertEquals(true, loaded!!.isUnlocked(Tool.RAIL))
         assertEquals(true, loaded.isUnlocked(Tool.AIRPORT))
         assertEquals(true, loaded.isUnlocked(Tool.POLICE))
+    }
+
+    @Test
+    fun taxRateScalesIncomeAndSoursTheMood() {
+        val e = city(61)
+        buildBasicTown(e)
+        repeat(400) { e.tick() }
+        assertTrue("people live here", e.population > 0)
+        assertEquals(Config.TAX_DEFAULT, e.taxRate)
+        val defaultIncome = e.incomePerDay
+        assertTrue(defaultIncome > 0f)
+
+        assertTrue(e.setTaxRate(20))
+        assertEquals(20, e.taxRate)
+        assertEquals("doubling the rate doubles the tax take", defaultIncome * 2f, e.incomePerDay, defaultIncome * 0.02f)
+
+        val before = e.happiness
+        repeat(150) { e.tick() }
+        assertTrue("higher taxes hurt happiness", e.happiness < before)
+
+        e.setTaxRate(999)
+        assertEquals(Config.TAX_MAX, e.taxRate)
+        e.setTaxRate(-5)
+        assertEquals(Config.TAX_MIN, e.taxRate)
+        assertEquals("no tax means no tax income", 0f, e.incomePerDay, 0.001f)
+        assertTrue(e.setTaxRate(12))
+        assertEquals(false, e.setTaxRate(12)) // already there
+    }
+
+    @Test
+    fun subwaysRunUnderBuildingsAndNeedStations() {
+        val e = city(79)
+        val (c, r) = findDryBlock(e, 5, 2)!!
+        val before = e.funds
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c, r))
+        assertEquals(before - Config.COST_SUBWAY, e.funds)
+        assertEquals("a tunnel does not occupy the tile", ZoneType.NONE, e.tile(c, r)!!.zone)
+        assertTrue(e.tile(c, r)!!.subway)
+        assertEquals("one tunnel is not a line yet", false, e.tile(c, r)!!.subwayConnected)
+
+        assertEquals("a station cannot stand beside a stub", BuildResult.NO_SUBWAY, e.build(Tool.SUBWAY_STATION, c, r + 1))
+
+        // tunnels share a tile with whatever sits on top of them
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, c + 1, r))
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c + 1, r))
+        assertEquals(ZoneType.RESIDENTIAL, e.tile(c + 1, r)!!.zone)
+        assertTrue("a tunnel runs under the house", e.tile(c + 1, r)!!.subway)
+        assertTrue("two connected tunnels make a line", e.tile(c, r)!!.subwayConnected)
+
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY_STATION, c, r + 1))
+        assertEquals(ZoneType.SUBWAY_STATION, e.tile(c, r + 1)!!.zone)
+        assertEquals(1, e.subwayStationCount)
+        assertEquals(2, e.subwayCount)
+        assertTrue("the station reaches the lot three tiles out", e.tile(c + 3, r + 1)!!.subwayAccess)
+        assertTrue("subway access counts as transit", e.tile(c + 3, r + 1)!!.transitAccess)
+        assertEquals(
+            "stations still need a tunnel right beside them",
+            BuildResult.NO_SUBWAY,
+            e.build(Tool.SUBWAY_STATION, c + 4, r)
+        )
+    }
+
+    @Test
+    fun subwayTunnelsCostMoreUnderTheRiver() {
+        val e = city(89)
+        val (wc, wr) = findTile(e) { it.terrain == Terrain.WATER }!!
+        val before = e.funds
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, wc, wr))
+        assertEquals(before - Config.COST_SUBWAY_WATER, e.funds)
+        assertEquals(ZoneType.NONE, e.tile(wc, wr)!!.zone)
+        assertTrue(e.tile(wc, wr)!!.subway)
+    }
+
+    @Test
+    fun taxRateAndTunnelsSurviveASave() {
+        val e = city(67)
+        e.setTaxRate(17)
+        val (c, r) = findDryBlock(e, 4, 2)!!
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c, r))
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c + 1, r))
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY_STATION, c, r + 1))
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull("the save still loads", loaded)
+        assertEquals(17, loaded!!.taxRate)
+        assertTrue(loaded.tile(c, r)!!.subway)
+        assertTrue(loaded.tile(c + 1, r)!!.subway)
+        assertEquals(ZoneType.SUBWAY_STATION, loaded.tile(c, r + 1)!!.zone)
+        assertTrue("the platform still reaches after loading", loaded.tile(c + 3, r + 1)!!.subwayAccess)
+    }
+
+    @Test
+    fun bulldozingLiftsTheTunnel() {
+        val e = city(83)
+        val (c, r) = findDryBlock(e, 3, 2)!!
+        assertEquals(BuildResult.OK, e.build(Tool.SUBWAY, c, r))
+        val after = e.funds
+        assertEquals(BuildResult.OK, e.build(Tool.BULLDOZE, c, r))
+        assertEquals(false, e.tile(c, r)!!.subway)
+        val refund = (Config.COST_SUBWAY * Config.BULLDOZE_REFUND).roundToInt()
+        assertEquals("the tunnel is refunded with the tile", after + refund, e.funds)
+    }
+
+    @Test
+    fun subwayToolsArriveTogetherWithTown() {
+        val e = progressiveCity()
+        assertEquals(false, e.isUnlocked(Tool.SUBWAY))
+        assertEquals(false, e.isUnlocked(Tool.SUBWAY_STATION))
+        assertTrue(Milestone.TOWN.unlocks.contains(Tool.SUBWAY))
+        assertTrue("stations arrive with tunnels so lines are usable", Milestone.TOWN.unlocks.contains(Tool.SUBWAY_STATION))
+    }
+
+    @Test
+    fun advisorReadsTheMoodAndNamesTheProblems() {
+        val fresh = CityAdvisor.report(city(73))
+        assertEquals(CityMood.CONTENT, fresh.mood)
+        assertTrue(fresh.headline.startsWith("Content"))
+        assertTrue(
+            "an empty map is called out",
+            fresh.issues.any { it.title == "Nobody lives here yet" }
+        )
+
+        val e = city(73)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(240) { e.tick() }
+        assertTrue("a home exists", e.tile(11, 11)!!.developed)
+
+        // pull the plant down: the advisor should shout about the blackout
+        assertEquals(BuildResult.OK, e.build(Tool.BULLDOZE, 10, 10))
+        val dark = CityAdvisor.report(e)
+        assertTrue(
+            "a blackout is critical",
+            dark.issues.any { it.level == IssueLevel.CRITICAL && it.title.contains("power") }
+        )
+        assertTrue("the advisor suggests something", dark.issues.isNotEmpty())
+
+        // heavy taxes are reported too
+        e.setTaxRate(Config.TAX_MAX)
+        repeat(120) { e.tick() }
+        val taxed = CityAdvisor.report(e)
+        assertTrue(
+            "the tax burden is named",
+            taxed.issues.any { it.title == "Taxes are squeezing people" }
+        )
     }
 
     /** A little grid of powered, watered, road-connected lots to grow a city. */
@@ -673,6 +1240,22 @@ class CityEngineTest {
         for (r in 12..14) e.build(Tool.INDUSTRIAL, 10, r)
         e.build(Tool.PARK, 9, 10)
         e.build(Tool.PARK, 9, 15)
+    }
+
+    /** The top-left corner of a dry w x h patch, so tunnel runs never hit water. */
+    private fun findDryBlock(e: CityEngine, w: Int, h: Int): Pair<Int, Int>? {
+        for (r in 0 until e.rows - h + 1) {
+            for (c in 0 until e.cols - w + 1) {
+                var dry = true
+                for (rr in r until r + h) {
+                    for (cc in c until c + w) {
+                        if (e.tile(cc, rr)!!.terrain == Terrain.WATER) dry = false
+                    }
+                }
+                if (dry) return c to r
+            }
+        }
+        return null
     }
 
     /** First horizontal run of dry tiles, so pipe runs never hit the river. */

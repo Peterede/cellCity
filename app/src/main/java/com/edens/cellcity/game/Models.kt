@@ -1,4 +1,4 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 /** What the ground looks like before the city is built on it. */
 enum class Terrain {
@@ -25,7 +25,9 @@ enum class ZoneType {
     /** Legacy only: old saves stored mains as a zone. New pipes live in [Tile.pipe]. */
     PIPE,
     STATION,
-    HIGHWAY;
+    HIGHWAY,
+    /** Appended last so that zone ordinals in older saves keep their meaning. */
+    SUBWAY_STATION;
 
     val isZone: Boolean
         get() = this == RESIDENTIAL || this == COMMERCIAL || this == INDUSTRIAL
@@ -40,7 +42,7 @@ enum class ZoneType {
     /** Utilities and emergency services: paid for, but nobody lives in them. */
     val isService: Boolean
         get() = this == PLANT || this == WATERWORKS || this == POLICE ||
-            this == FIRE || this == HOSPITAL || this == STATION
+            this == FIRE || this == HOSPITAL || this == STATION || this == SUBWAY_STATION
 
     /** Structures that always occupy a full 2x2 block. */
     val isMultiTile: Boolean
@@ -64,6 +66,7 @@ enum class ZoneType {
             PIPE -> "Water pipe"
             STATION -> "Train station"
             HIGHWAY -> "Highway"
+            SUBWAY_STATION -> "Subway station"
         }
 }
 
@@ -72,7 +75,10 @@ enum class Tool(val zone: ZoneType, val label: String) {
     ROAD(ZoneType.ROAD, "ROAD"),
     HIGHWAY(ZoneType.HIGHWAY, "HWY"),
     RAIL(ZoneType.RAIL, "RAIL"),
+    /** Tunnels are a buried layer, like mains and cables. */
+    SUBWAY(ZoneType.NONE, "SUBWAY"),
     STATION(ZoneType.STATION, "STATION"),
+    SUBWAY_STATION(ZoneType.SUBWAY_STATION, "SUB STN"),
     AIRPORT(ZoneType.AIRPORT, "AIR"),
     RESIDENTIAL(ZoneType.RESIDENTIAL, "RES"),
     COMMERCIAL(ZoneType.COMMERCIAL, "COM"),
@@ -87,18 +93,20 @@ enum class Tool(val zone: ZoneType, val label: String) {
     FIRE(ZoneType.FIRE, "FIRE"),
     HOSPITAL(ZoneType.HOSPITAL, "HOSP"),
     BULLDOZE(ZoneType.NONE, "DOZE"),
-    PAN(ZoneType.NONE, "PAN");
+    PAN(ZoneType.NONE, "PAN"),
+    /** Read-only tool: tapping a cell explains what it needs. */
+    INFO(ZoneType.NONE, "INFO");
 
     /** True for tools that bury a layer instead of occupying the tile. */
     val isLayer: Boolean
-        get() = this == PIPE || this == POWERLINE
+        get() = this == PIPE || this == POWERLINE || this == SUBWAY
 
     val buildsZones: Boolean
         get() = this != PAN && this != BULLDOZE
 
-    /** Civic buildings snap to one spot instead of being painted along a drag. */
+    /** Civic buildings and the info tool act on one tile per tap. */
     val singlePlacement: Boolean
-        get() = zone.isService || zone.isMultiTile
+        get() = zone.isService || zone.isMultiTile || this == INFO
 }
 
 /** One map cell. */
@@ -122,6 +130,34 @@ class Tile {
     /** Buried power cable under this tile, on top of whichever zone is here. */
     var powerline: Boolean = false
 
+    /** A subway tunnel buried under this tile; it can share the tile with anything. */
+    var subway: Boolean = false
+
+    /** True when this tunnel is part of a line of two or more connected tunnel tiles. */
+    var subwayConnected: Boolean = false
+
+    /** True when a subway station with a live tunnel reaches this tile. */
+    var subwayAccess: Boolean = false
+
+    /** Rail or subway access: either one speeds up growth and maturity. */
+    val transitAccess: Boolean
+        get() = railAccess || subwayAccess
+
+    /** Days this building has been on fire; 0 means it is safe. */
+    var fire: Int = 0
+
+    /** Days a crime mark lingers on this building; 0 means it is clean. */
+    var crime: Int = 0
+
+    /** Computed each tick: a police station reaches this tile. */
+    var policeCovered: Boolean = false
+
+    /** Computed each tick: a fire station reaches this tile. */
+    var fireCovered: Boolean = false
+
+    /** Computed each tick: a hospital reaches this tile. */
+    var healthCovered: Boolean = false
+
     /** True when this tile is one quarter of a 2x2 block (merged lots or an airport). */
     var merged: Boolean = false
     var originCol: Int = -1
@@ -143,6 +179,11 @@ class Tile {
         distress = 0
         pipe = false
         powerline = false
+        subway = false
+        subwayConnected = false
+        subwayAccess = false
+        fire = 0
+        crime = 0
         merged = false
         originCol = -1
         originRow = -1
@@ -156,6 +197,7 @@ enum class BuildResult(val message: String) {
     WATER("Can't build on water"),
     NO_ROAD("Needs a road beside it"),
     NO_RAIL("Needs rail beside it"),
+    NO_SUBWAY("Needs a subway line under or beside it"),
     LOCKED("Locked - reach the next milestone"),
     CANNOT("Can't build there"),
     OUT_OF_BOUNDS("")
@@ -175,7 +217,12 @@ enum class Milestone(
     FIRST_HOME("First Residents", "Reach 10 population", 250, listOf(Tool.RAIL)),
     HAMLET("Hamlet", "Reach 100 population", 500, listOf(Tool.STATION, Tool.HIGHWAY)),
     STEADY("Steady Hands", "30 stable days in a row", 750, listOf(Tool.POLICE, Tool.FIRE)),
-    TOWN("Town", "Reach 500 population", 1_000, listOf(Tool.HOSPITAL)),
+    TOWN(
+        "Town",
+        "Reach 500 population",
+        1_000,
+        listOf(Tool.HOSPITAL, Tool.SUBWAY, Tool.SUBWAY_STATION)
+    ),
     SKYLINE("Skyline", "Merge four lots into one large building", 1_500, listOf(Tool.AIRPORT)),
     CITY("City", "Reach 1,000 population", 3_000, emptyList()),
     STABLE_CYCLE("Stable Cycle", "100 stable days in a row", 5_000, emptyList()),
@@ -194,7 +241,8 @@ enum class Milestone(
             Tool.PIPE,
             Tool.POWERLINE,
             Tool.BULLDOZE,
-            Tool.PAN
+            Tool.PAN,
+            Tool.INFO
         )
     }
 }
@@ -217,6 +265,27 @@ sealed class CityEvent {
     data class Died(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
 
     data class MilestoneReached(val milestone: Milestone) : CityEvent()
+
+    /** A building with no fire cover has caught fire. */
+    data class FireStarted(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
+
+    /** Fire crews reached a burning building and put it out. */
+    data class FireOut(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
+
+    /** Nobody reached a fire in time and the building was gutted. */
+    data class FireDestroyed(val zone: ZoneType, val col: Int, val row: Int) : CityEvent()
+
+    /**
+     * Crime got worse: [stage] climbs from 1 (first report) to 3 (everywhere).
+     * The UI announces it with a police siren and can jump to ([col], [row]).
+     */
+    data class CrimeReported(
+        val text: String,
+        val count: Int,
+        val stage: Int,
+        val col: Int,
+        val row: Int
+    ) : CityEvent()
 
     data class Notice(val text: String) : CityEvent()
 }

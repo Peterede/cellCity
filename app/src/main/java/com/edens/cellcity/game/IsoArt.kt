@@ -1,4 +1,4 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 import android.graphics.Canvas
 import android.graphics.Color
@@ -403,6 +403,7 @@ class CityRenderer(private val density: Float) {
         // buried layers normally hide under buildings; their tool lifts them on top
         if (tool == Tool.PIPE) drawConduitOverlay(canvas, engine, u, power = false)
         if (tool == Tool.POWERLINE) drawConduitOverlay(canvas, engine, u, power = true)
+        if (tool == Tool.SUBWAY) drawSubwayOverlay(canvas, engine, u)
 
         drawCars(canvas, u)
         drawTrains(canvas, u)
@@ -557,6 +558,9 @@ class CityRenderer(private val density: Float) {
         if (tile.powerline && !inBlock) {
             drawConduit(canvas, engine, col, row, cx, cy, hw, hh, u, tile, power = true)
         }
+        if (tile.subway && !inBlock) {
+            drawSubwayTunnel(canvas, engine, col, row, cx, cy, hw, hh, u, tile)
+        }
 
         if (origin) {
             val bcx = camera.screenX(col + 0.5f, row + 0.5f)
@@ -575,6 +579,9 @@ class CityRenderer(private val density: Float) {
             }
             if (tile.zone == ZoneType.RAIL) drawRail(canvas, engine, col, row, cx, cy, hw, hh, u)
             if (tile.zone == ZoneType.STATION) drawTrainStation(canvas, cx, cy, hw, hh, u)
+            if (tile.zone == ZoneType.SUBWAY_STATION) {
+                drawSubwayStation(canvas, cx, cy, hw, hh, u, tile.subwayConnected)
+            }
             if (tile.zone == ZoneType.PARK) drawPark(canvas, cx, cy, hw, hh, u, col, row, time)
             if (tile.zone == ZoneType.PLANT) drawPlant(canvas, cx, cy, hw, hh, u, col, row, time)
             if (tile.zone == ZoneType.WATERWORKS) drawWaterWorks(canvas, cx, cy, hw, hh, u)
@@ -595,6 +602,10 @@ class CityRenderer(private val density: Float) {
                 drawGrassDetail(canvas, cx, cy, hw, hh, u, col, row)
             }
         }
+
+        // disasters sit above whatever is on the tile
+        if (tile.fire > 0) drawFlames(canvas, cx, cy, hw, hh, u, time)
+        if (tile.crime > 0) drawCrimeMark(canvas, cx, cy, hw, hh, u)
 
         if (tile.zone.isZone) {
             val badges = ArrayList<Badge>(3)
@@ -1090,10 +1101,10 @@ class CityRenderer(private val density: Float) {
         val rightAy = topY + fh
         val rightBx = cx + fw
         val rightBy = topY
-            faceQuad(
-                canvas, rightAx, rightAy, rightBx, rightBy, cx + fw, baseY, cx, baseY + fh,
-                0.22f, 0.44f, 0.52f, 0.92f, darken(roof, 0.7f), inkW
-            )
+        faceQuad(
+            canvas, rightAx, rightAy, rightBx, rightBy, cx + fw, baseY, cx, baseY + fh,
+            0.22f, 0.44f, 0.52f, 0.92f, darken(roof, 0.7f), inkW
+        )
         faceQuad(
             canvas, rightAx, rightAy, rightBx, rightBy, cx + fw, baseY, cx, baseY + fh,
             0.56f, 0.80f, 0.30f, 0.54f, WINDOW, inkW
@@ -1638,6 +1649,103 @@ class CityRenderer(private val density: Float) {
         }
     }
 
+    /**
+     * A subway tunnel: a heavy ink casing with a dashed teal core, drawn on the
+     * surface so the network stays readable while it runs under the city. Stubs
+     * that never reach a second tunnel stay grey.
+     */
+    private fun drawSubwayTunnel(
+        canvas: Canvas,
+        engine: CityEngine,
+        col: Int,
+        row: Int,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        tile: Tile,
+        highlight: Boolean = false
+    ) {
+        val east = engine.tile(col + 1, row)?.subway == true
+        val west = engine.tile(col - 1, row)?.subway == true
+        val south = engine.tile(col, row + 1)?.subway == true
+        val north = engine.tile(col, row - 1)?.subway == true
+        val any = east || west || south || north
+        val live = tile.subwayConnected
+        val core = if (live) Config.TUNNEL else 0xFF7A868A.toInt()
+
+        fun trace() {
+            path.reset()
+            if (east) {
+                path.moveTo(cx, cy)
+                path.lineTo(cx + hw * 0.5f, cy + hh * 0.5f)
+            }
+            if (west) {
+                path.moveTo(cx, cy)
+                path.lineTo(cx - hw * 0.5f, cy - hh * 0.5f)
+            }
+            if (south) {
+                path.moveTo(cx, cy)
+                path.lineTo(cx - hw * 0.5f, cy + hh * 0.5f)
+            }
+            if (north) {
+                path.moveTo(cx, cy)
+                path.lineTo(cx + hw * 0.5f, cy - hh * 0.5f)
+            }
+            if (!any) {
+                path.moveTo(cx - hw * 0.22f, cy + hh * 0.22f)
+                path.lineTo(cx + hw * 0.22f, cy - hh * 0.22f)
+            }
+        }
+
+        if (highlight) {
+            trace()
+            line.color = PAPER
+            line.strokeWidth = max(1.6f, 8f * u)
+            canvas.drawPath(path, line)
+        }
+
+        trace()
+        line.color = INK
+        line.strokeWidth = max(1f, 6f * u)
+        canvas.drawPath(path, line)
+
+        trace()
+        dashed.color = core
+        dashed.strokeWidth = max(0.8f, 2.6f * u)
+        canvas.drawPath(path, dashed)
+
+        // manhole cover: amber when the tunnel is part of a working line
+        fill.color = if (live) Config.TUNNEL else 0xFF6A7578.toInt()
+        canvas.drawCircle(cx, cy, 3.2f * u, fill)
+        line.color = if (live) AMBER else 0xFFB4BCBE.toInt()
+        line.strokeWidth = max(0.8f, 1.1f * u)
+        canvas.drawCircle(cx, cy, 3.2f * u, line)
+        if (live) {
+            fill.color = AMBER
+            canvas.drawCircle(cx, cy, 1.1f * u, fill)
+        }
+    }
+
+    /** Lifts the tunnel layer above the buildings while the subway tool is active. */
+    private fun drawSubwayOverlay(canvas: Canvas, engine: CityEngine, u: Float) {
+        val hw = camera.tileW * 0.5f * camera.zoom
+        val hh = camera.tileH * 0.5f * camera.zoom
+        val margin = hw * 2f
+        for (r in 0 until engine.rows) {
+            for (c in 0 until engine.cols) {
+                val tile = engine.tile(c, r) ?: continue
+                if (!tile.subway) continue
+                val cx = camera.screenX(c.toFloat(), r.toFloat())
+                val cy = camera.screenY(c.toFloat(), r.toFloat())
+                if (cx < -margin || cx > viewW + margin) continue
+                if (cy < -margin || cy > viewH + margin) continue
+                drawSubwayTunnel(canvas, engine, c, r, cx, cy, hw, hh, u, tile, highlight = true)
+            }
+        }
+    }
+
     /** A set of sleepers and two steel rails running along one iso axis. */
     private fun drawTrack(
         canvas: Canvas,
@@ -1763,6 +1871,105 @@ class CityRenderer(private val density: Float) {
         canvas.drawCircle(cx + hw * 0.42f, cy + hh * 0.3f - 14f * u, 2f * u, fill)
         line.color = INK
         canvas.drawCircle(cx + hw * 0.42f, cy + hh * 0.3f - 14f * u, 2f * u, line)
+    }
+
+    /**
+     * A subway entrance: a stairwell sinking under a glass canopy, with a tall
+     * round sign so the platform reads at a glance.
+     */
+    private fun drawSubwayStation(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        live: Boolean
+    ) {
+        val inkW = max(1.1f, 1.5f * u)
+        diamondPath(cx, cy, hw * 0.86f, hh * 0.86f)
+        fill.color = CONCRETE
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        // pavement edging around the stair
+        diamondPath(cx, cy + hh * 0.06f, hw * 0.7f, hh * 0.7f)
+        fill.color = CONCRETE_DARK
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1f * u)
+        canvas.drawPath(path, line)
+
+        // the stairwell itself: a dark hole with descending steps
+        val stairW = hw * 0.42f
+        val stairH = 9f * u
+        rect.set(cx - stairW, cy - hh * 0.02f - stairH, cx + stairW, cy + hh * 0.18f + stairH)
+        fill.color = 0xFF1B2C33.toInt()
+        canvas.drawRoundRect(rect, 3f * u, 3f * u, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.1f * u)
+        canvas.drawRoundRect(rect, 3f * u, 3f * u, line)
+
+        line.color = 0xFF6E8188.toInt()
+        line.strokeWidth = max(0.6f, 0.9f * u)
+        path.reset()
+        for (i in 0..3) {
+            val y = cy + hh * 0.02f - stairH + i * 4.4f * u
+            path.moveTo(cx - stairW * 0.76f, y)
+            path.lineTo(cx + stairW * 0.76f, y)
+        }
+        canvas.drawPath(path, line)
+
+        // glass canopy over the entrance
+        val roofY = cy - hh * 0.34f - 13f * u
+        path.reset()
+        path.moveTo(cx - hw * 0.58f, roofY + 5f * u)
+        path.lineTo(cx, roofY - 4f * u)
+        path.lineTo(cx + hw * 0.58f, roofY + 5f * u)
+        path.lineTo(cx, roofY + 12f * u)
+        path.close()
+        fill.color = withAlpha(0xFF9FD8D6.toInt(), 235)
+        canvas.drawPath(path, fill)
+        line.color = Config.TUNNEL
+        line.strokeWidth = max(0.9f, 1.3f * u)
+        canvas.drawPath(path, line)
+
+        // canopy posts
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.1f * u)
+        path.reset()
+        path.moveTo(cx - hw * 0.42f, roofY + 7f * u)
+        path.lineTo(cx - hw * 0.42f, cy + hh * 0.26f)
+        path.moveTo(cx + hw * 0.42f, roofY + 7f * u)
+        path.lineTo(cx + hw * 0.42f, cy + hh * 0.26f)
+        canvas.drawPath(path, line)
+
+        // round platform sign on a pole
+        val poleX = cx + hw * 0.56f
+        val poleTop = cy - hh * 0.2f - 22f * u
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.2f * u)
+        path.reset()
+        path.moveTo(poleX, poleTop)
+        path.lineTo(poleX, cy + hh * 0.3f)
+        canvas.drawPath(path, line)
+        fill.color = if (live) Config.TUNNEL else 0xFF6A7578.toInt()
+        canvas.drawCircle(poleX, poleTop, 6f * u, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.2f * u)
+        canvas.drawCircle(poleX, poleTop, 6f * u, line)
+        zoneText.color = PAPER
+        zoneText.textSize = 7.5f * u
+        canvas.drawText("U", poleX, poleTop + 2.7f * u, zoneText)
+
+        // a lamp by the stair
+        fill.color = AMBER
+        canvas.drawCircle(cx - hw * 0.5f, cy + hh * 0.28f, 2.2f * u, fill)
+        line.color = INK
+        line.strokeWidth = max(0.7f, 1f * u)
+        canvas.drawCircle(cx - hw * 0.5f, cy + hh * 0.28f, 2.2f * u, line)
     }
 
     private fun drawWaterWorks(canvas: Canvas, cx: Float, cy: Float, hw: Float, hh: Float, u: Float) {
@@ -2262,6 +2469,70 @@ class CityRenderer(private val density: Float) {
             fill.color = INK
             canvas.drawPath(path, fill)
         }
+    }
+
+    /** Flickering flames and smoke over a burning building. */
+    private fun drawFlames(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        time: Float
+    ) {
+        fill.color = withAlpha(0xFF6F7C86.toInt(), 90)
+        for (i in 0 until 3) {
+            val drift = sin(time * 1.4f + i * 1.1f) * 3.4f * u
+            canvas.drawCircle(
+                cx + drift,
+                cy - hh * 0.7f - i * 6.5f * u,
+                (4.5f + i * 2.2f) * u,
+                fill
+            )
+        }
+
+        val baseY = cy - hh * 0.05f
+        for (i in 0 until 3) {
+            val phase = time * 6.2f + i * 1.7f
+            val wobble = sin(phase) * 1.7f * u
+            val height = (13f + (i % 2) * 5f + sin(phase * 1.3f) * 2.2f) * u
+            val x = cx + (i - 1) * 6.8f * u + wobble
+            path.reset()
+            path.moveTo(x, baseY - height)
+            path.quadTo(x + 6f * u, baseY - height * 0.45f, x + 3.6f * u, baseY)
+            path.quadTo(x, baseY - height * 0.22f, x - 3.6f * u, baseY)
+            path.quadTo(x - 6f * u, baseY - height * 0.45f, x, baseY - height)
+            path.close()
+            fill.color = if (i == 1) AMBER else CORAL
+            canvas.drawPath(path, fill)
+            line.color = INK
+            line.strokeWidth = max(0.8f, 1.1f * u)
+            canvas.drawPath(path, line)
+        }
+    }
+
+    /** A little warning bubble marking a building hit by crime. */
+    private fun drawCrimeMark(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float
+    ) {
+        val x = cx + hw * 0.5f
+        val y = cy - hh * 0.55f
+        val r = 5.6f * u
+        fill.color = CORAL
+        canvas.drawCircle(x, y, r, fill)
+        line.color = INK
+        line.strokeWidth = max(0.9f, 1.2f * u)
+        canvas.drawCircle(x, y, r, line)
+        fill.color = PAPER
+        rect.set(x - 0.9f * u, y - 3.2f * u, x + 0.9f * u, y + 0.5f * u)
+        canvas.drawRoundRect(rect, 0.9f * u, 0.9f * u, fill)
+        canvas.drawCircle(x, y + 2.6f * u, 1.1f * u, fill)
     }
 
     private fun drawCars(canvas: Canvas, u: Float) {

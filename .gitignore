@@ -1,10 +1,16 @@
 *.iml
+# upload key for Play - never commit
+keystore.properties
+*.jks
+keystore/
+*.keystore
 .gradle/
 /local.properties
 .idea/
 .DS_Store
 /build/
 /app/build/
+/dist/
 captures/
 .externalNativeBuild/
 .cxx/

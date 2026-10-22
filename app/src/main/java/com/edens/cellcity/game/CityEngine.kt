@@ -1,4 +1,4 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 import kotlin.math.abs
 import kotlin.math.max
@@ -46,6 +46,13 @@ class CityEngine(
     var demandI: Float = Config.DEMAND_BASE_I
         private set
 
+    /**
+     * What citizens pay, in percent. 10 is the baseline the economy was tuned
+     * around; raising it fills the treasury but sours the mood.
+     */
+    var taxRate: Int = Config.TAX_DEFAULT
+        private set
+
     /** Share of developed lots covered by each emergency service, 0..1. */
     var policeCoverage: Float = 0f
         private set
@@ -54,9 +61,21 @@ class CityEngine(
     var healthCoverage: Float = 0f
         private set
 
+    /** Buildings currently burning, and buildings carrying a crime mark. */
+    var activeFires: Int = 0
+        private set
+    var activeCrime: Int = 0
+        private set
+
+    /** Built lots that no fire or police station reaches yet: the next victims. */
+    val fireRiskLots: Int get() = countTiles { it.developed && !it.fireCovered }
+    val crimeRiskLots: Int get() = countTiles { it.developed && !it.policeCovered }
+
     private var monthIncome = 0f
     private var monthExpenses = 0f
     private var debtWarned = false
+    /** Last crime warning stage, so the city is not spammed every day. */
+    private var crimeStage = 0
 
     // --- progression -------------------------------------------------------
     /** Consecutive days the city has counted as stable (populous, happy, in the black). */
@@ -93,6 +112,8 @@ class CityEngine(
     val roadCount: Int get() = countTiles { it.zone == ZoneType.ROAD }
     val highwayCount: Int get() = countTiles { it.zone == ZoneType.HIGHWAY }
     val railCount: Int get() = countTiles { it.zone == ZoneType.RAIL }
+    val subwayCount: Int get() = countTiles { it.subway }
+    val subwayStationCount: Int get() = countTiles { it.zone == ZoneType.SUBWAY_STATION }
     val parkCount: Int get() = countTiles { it.zone == ZoneType.PARK }
     val plantCount: Int get() = countTiles { it.zone == ZoneType.PLANT }
     val waterCount: Int get() = countTiles { it.zone == ZoneType.WATERWORKS }
@@ -115,10 +136,28 @@ class CityEngine(
     val netPerDay: Int
         get() = (dailyIncome() - dailyExpenses()).roundToInt()
 
+    /** Tax money the city takes in each day at the current rate. */
+    val incomePerDay: Float get() = dailyIncome()
+
+    /** What the city pays each day to keep everything running. */
+    val expensesPerDay: Float get() = dailyExpenses()
+
     val dateLabel: String
         get() = "${MONTHS[(month - 1).coerceIn(0, 11)]} $year"
 
     // ------------------------------------------------------------- progression
+
+    /**
+     * Moves the tax rate within [Config.TAX_MIN]..[Config.TAX_MAX]. Returns true
+     * when the rate actually changed, so callers know whether to redraw.
+     */
+    fun setTaxRate(rate: Int): Boolean {
+        val next = rate.coerceIn(Config.TAX_MIN, Config.TAX_MAX)
+        if (next == taxRate) return false
+        taxRate = next
+        updateHappiness()
+        return true
+    }
 
     /** Whether the given tool may be built in this city right now. */
     fun isUnlocked(tool: Tool): Boolean {
@@ -162,7 +201,9 @@ class CityEngine(
         Tool.ROAD -> Config.COST_ROAD
         Tool.HIGHWAY -> Config.COST_HIGHWAY
         Tool.RAIL -> Config.COST_RAIL
+        Tool.SUBWAY -> Config.COST_SUBWAY
         Tool.STATION -> Config.COST_STATION
+        Tool.SUBWAY_STATION -> Config.COST_SUBWAY_STATION
         Tool.RESIDENTIAL -> Config.COST_RESIDENTIAL
         Tool.COMMERCIAL -> Config.COST_COMMERCIAL
         Tool.INDUSTRIAL -> Config.COST_INDUSTRIAL
@@ -175,7 +216,7 @@ class CityEngine(
         Tool.FIRE -> Config.COST_FIRE
         Tool.HOSPITAL -> Config.COST_HOSPITAL
         Tool.AIRPORT -> Config.COST_AIRPORT
-        Tool.BULLDOZE, Tool.PAN -> 0
+        Tool.BULLDOZE, Tool.PAN, Tool.INFO -> 0
     }
 
     fun costOf(tool: Tool, col: Int, row: Int): Int {
@@ -187,13 +228,13 @@ class CityEngine(
             } else {
                 Config.COST_HIGHWAY
             }
-            Tool.PIPE, Tool.POWERLINE -> layerCost(tool, t.terrain)
+            Tool.PIPE, Tool.POWERLINE, Tool.SUBWAY -> layerCost(tool, t.terrain)
             else -> baseCost(tool)
         }
     }
 
     fun canBuild(tool: Tool, col: Int, row: Int): BuildResult {
-        if (tool == Tool.PAN) return BuildResult.OK
+        if (tool == Tool.PAN || tool == Tool.INFO) return BuildResult.OK
         if (!inBounds(col, row)) return BuildResult.OUT_OF_BOUNDS
         val t = grid[row][col]
         if (tool == Tool.BULLDOZE) return BuildResult.OK
@@ -202,6 +243,7 @@ class CityEngine(
         if (t.zone == tool.zone) return BuildResult.OK
         if (tool == Tool.AIRPORT) return canBuildAirport(col, row)
         if (tool == Tool.STATION) return canBuildStation(col, row)
+        if (tool == Tool.SUBWAY_STATION) return canBuildSubwayStation(col, row)
         if (t.zone != ZoneType.NONE) return BuildResult.OCCUPIED
         if (t.terrain == Terrain.WATER && !tool.zone.isRoad) return BuildResult.WATER
         if (t.terrain == Terrain.WATER && tool.zone.isRoad) {
@@ -236,13 +278,24 @@ class CityEngine(
         } else {
             Config.COST_POWERLINE
         }
+        Tool.SUBWAY -> if (terrain == Terrain.WATER) {
+            Config.COST_SUBWAY_WATER
+        } else {
+            Config.COST_SUBWAY
+        }
         else -> 0
     }
 
-    /** Mains and cables are layers: they fit under any existing zone, road or building. */
+    /** Mains, cables and tunnels are layers: they fit under any existing zone or building. */
     private fun canBuildLayer(tool: Tool, col: Int, row: Int): BuildResult {
         val t = grid[row][col]
-        if (if (tool == Tool.PIPE) t.pipe else t.powerline) return BuildResult.OK
+        val laid = when (tool) {
+            Tool.PIPE -> t.pipe
+            Tool.POWERLINE -> t.powerline
+            Tool.SUBWAY -> t.subway
+            else -> false
+        }
+        if (laid) return BuildResult.OK
         if (funds < layerCost(tool, t.terrain)) return BuildResult.NO_FUNDS
         return BuildResult.OK
     }
@@ -256,15 +309,38 @@ class CityEngine(
         return BuildResult.OK
     }
 
+    /** A subway station needs a live tunnel running under it or right beside it. */
+    private fun canBuildSubwayStation(col: Int, row: Int): BuildResult {
+        if (grid[row][col].zone != ZoneType.NONE) return BuildResult.OCCUPIED
+        if (grid[row][col].terrain == Terrain.WATER) return BuildResult.WATER
+        if (!subwayLineAt(col, row)) return BuildResult.NO_SUBWAY
+        if (funds < Config.COST_SUBWAY_STATION) return BuildResult.NO_FUNDS
+        return BuildResult.OK
+    }
+
+    /** True when a connected tunnel runs under or beside this tile. */
+    private fun subwayLineAt(col: Int, row: Int): Boolean {
+        if (grid[row][col].subwayConnected) return true
+        if (col > 0 && grid[row][col - 1].subwayConnected) return true
+        if (col < cols - 1 && grid[row][col + 1].subwayConnected) return true
+        if (row > 0 && grid[row - 1][col].subwayConnected) return true
+        if (row < rows - 1 && grid[row + 1][col].subwayConnected) return true
+        return false
+    }
+
     fun build(tool: Tool, col: Int, row: Int): BuildResult {
         val check = canBuild(tool, col, row)
         if (check != BuildResult.OK) return check
-        if (tool == Tool.PAN) return BuildResult.OK
+        if (tool == Tool.PAN || tool == Tool.INFO) return BuildResult.OK
         if (!inBounds(col, row)) return BuildResult.OUT_OF_BOUNDS
 
+        val fundsBefore = funds
         val t = grid[row][col]
         if (tool == Tool.BULLDOZE) {
-            if (t.zone == ZoneType.NONE && !t.pipe && !t.powerline) return BuildResult.OK
+            if (t.zone == ZoneType.NONE && !t.pipe && !t.powerline && !t.subway) {
+                return BuildResult.OK
+            }
+            snapshotForUndo(blockIndices(col, row, t), tool)
             val block = blockTiles(t)
             val wasAirport = t.zone == ZoneType.AIRPORT
             var value = 0f
@@ -272,12 +348,14 @@ class CityEngine(
                 value += investedCost(b)
                 if (b.pipe) value += layerCost(Tool.PIPE, b.terrain)
                 if (b.powerline) value += layerCost(Tool.POWERLINE, b.terrain)
+                if (b.subway) value += layerCost(Tool.SUBWAY, b.terrain)
             }
             if (wasAirport) {
                 value = Config.COST_AIRPORT.toFloat()
                 for (b in block) {
                     if (b.pipe) value += layerCost(Tool.PIPE, b.terrain)
                     if (b.powerline) value += layerCost(Tool.POWERLINE, b.terrain)
+                    if (b.subway) value += layerCost(Tool.SUBWAY, b.terrain)
                 }
             }
             funds += (value * Config.BULLDOZE_REFUND).roundToInt()
@@ -285,21 +363,35 @@ class CityEngine(
                 b.clear()
                 if (b.terrain == Terrain.FOREST) b.terrain = Terrain.GRASS
             }
+            accrueActionCost(fundsBefore)
             refreshInfrastructure()
             return BuildResult.OK
         }
         if (tool.isLayer) {
-            val laid = if (tool == Tool.PIPE) t.pipe else t.powerline
+            val laid = when (tool) {
+                Tool.PIPE -> t.pipe
+                Tool.POWERLINE -> t.powerline
+                Tool.SUBWAY -> t.subway
+                else -> false
+            }
             if (laid) return BuildResult.OK
+            snapshotForUndo(listOf(row * cols + col), tool)
             funds -= layerCost(tool, t.terrain)
-            if (tool == Tool.PIPE) t.pipe = true else t.powerline = true
+            when (tool) {
+                Tool.PIPE -> t.pipe = true
+                Tool.POWERLINE -> t.powerline = true
+                Tool.SUBWAY -> t.subway = true
+                else -> Unit
+            }
             events.add(CityEvent.Built(tool.zone, col, row))
+            accrueActionCost(fundsBefore)
             refreshInfrastructure()
             return BuildResult.OK
         }
         if (t.zone == tool.zone) return BuildResult.OK
-        if (tool == Tool.AIRPORT) return buildAirport(col, row)
+        if (tool == Tool.AIRPORT) return buildAirport(col, row, fundsBefore)
 
+        snapshotForUndo(listOf(row * cols + col), tool)
         val cost = costOf(tool, col, row)
         funds -= cost
         t.zone = tool.zone
@@ -307,11 +399,19 @@ class CityEngine(
         if (t.terrain == Terrain.FOREST) t.terrain = Terrain.GRASS
         if (tool == Tool.PARK || tool == Tool.PLANT || tool.zone.isService) t.level = 1
         events.add(CityEvent.Built(t.zone, col, row))
+        accrueActionCost(fundsBefore)
         refreshInfrastructure()
         return BuildResult.OK
     }
 
-    private fun buildAirport(col: Int, row: Int): BuildResult {
+    private fun buildAirport(col: Int, row: Int, fundsBefore: Int): BuildResult {
+        val indices = ArrayList<Int>(4)
+        for (r in row..row + 1) {
+            for (c in col..col + 1) {
+                if (inBounds(c, r)) indices.add(r * cols + c)
+            }
+        }
+        snapshotForUndo(indices, Tool.AIRPORT)
         funds -= Config.COST_AIRPORT
         for (r in row..row + 1) {
             for (c in col..col + 1) {
@@ -327,8 +427,142 @@ class CityEngine(
         }
         grid[row][col].jobs = Config.AIRPORT_JOBS
         events.add(CityEvent.Built(ZoneType.AIRPORT, col, row))
+        accrueActionCost(fundsBefore)
         refreshInfrastructure()
         return BuildResult.OK
+    }
+
+    // ------------------------------------------------------------------ undo
+
+    /** Everything a build can change on one tile, saved just before it changes. */
+    private data class TileState(
+        val terrain: Terrain,
+        val zone: ZoneType,
+        val level: Int,
+        val population: Int,
+        val jobs: Int,
+        val maturity: Int,
+        val variant: Int,
+        val distress: Int,
+        val pipe: Boolean,
+        val powerline: Boolean,
+        val subway: Boolean,
+        val fire: Int,
+        val crime: Int,
+        val merged: Boolean,
+        val originCol: Int,
+        val originRow: Int
+    ) {
+        constructor(t: Tile) : this(
+            t.terrain, t.zone, t.level, t.population, t.jobs, t.maturity, t.variant,
+            t.distress, t.pipe, t.powerline, t.subway, t.fire, t.crime, t.merged,
+            t.originCol, t.originRow
+        )
+    }
+
+    private data class UndoEntry(
+        val label: String,
+        val tiles: Map<Int, TileState>,
+        val fundsDelta: Int
+    )
+
+    private val undoStack = ArrayDeque<UndoEntry>()
+    private var actionTiles: MutableMap<Int, TileState>? = null
+    private var actionFunds = 0
+    private var actionLabel = ""
+
+    /** True when the last tap or drag can still be taken back. */
+    val canUndo: Boolean
+        get() = undoStack.isNotEmpty()
+
+    /**
+     * Groups every build made by one tap or drag into a single undo step.
+     * Anything left open from an interrupted gesture is closed first.
+     */
+    fun beginAction() {
+        endAction()
+        actionTiles = LinkedHashMap()
+        actionFunds = 0
+        actionLabel = ""
+    }
+
+    /** Closes the current step. Returns true when it changed any tiles. */
+    fun endAction(): Boolean {
+        val tiles = actionTiles
+        actionTiles = null
+        if (tiles.isNullOrEmpty()) return false
+        undoStack.addLast(UndoEntry(actionLabel, tiles, actionFunds))
+        while (undoStack.size > MAX_UNDO) undoStack.removeFirst()
+        return true
+    }
+
+    /**
+     * Puts the tiles of the last step back the way they were and settles the
+     * money it cost or refunded. Returns "build" or "bulldoze" when something
+     * was undone, or null when the stack is empty.
+     */
+    fun undo(): String? {
+        val entry = undoStack.removeLastOrNull() ?: return null
+        for ((index, state) in entry.tiles) {
+            val t = grid[index / cols][index % cols]
+            t.terrain = state.terrain
+            t.zone = state.zone
+            t.level = state.level
+            t.population = state.population
+            t.jobs = state.jobs
+            t.maturity = state.maturity
+            t.variant = state.variant
+            t.distress = state.distress
+            t.pipe = state.pipe
+            t.powerline = state.powerline
+            t.subway = state.subway
+            t.fire = state.fire
+            t.crime = state.crime
+            t.merged = state.merged
+            t.originCol = state.originCol
+            t.originRow = state.originRow
+        }
+        funds -= entry.fundsDelta
+        var pop = 0
+        var job = 0
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                pop += grid[r][c].population
+                job += grid[r][c].jobs
+            }
+        }
+        population = pop
+        jobs = job
+        refreshInfrastructure()
+        updateDemand()
+        return entry.label
+    }
+
+    private fun snapshotForUndo(indices: List<Int>, tool: Tool) {
+        val action = actionTiles ?: return
+        if (actionLabel.isEmpty()) actionLabel = if (tool == Tool.BULLDOZE) "bulldoze" else "build"
+        for (index in indices) {
+            if (!action.containsKey(index)) {
+                action[index] = TileState(grid[index / cols][index % cols])
+            }
+        }
+    }
+
+    private fun accrueActionCost(fundsBefore: Int) {
+        if (actionTiles == null) return
+        actionFunds += funds - fundsBefore
+    }
+
+    /** The 2x2 block of a merged lot (or airport), or just this tile. */
+    private fun blockIndices(col: Int, row: Int, t: Tile): List<Int> {
+        if (!t.merged || t.originCol < 0 || t.originRow < 0) return listOf(row * cols + col)
+        val indices = ArrayList<Int>(4)
+        for (r in t.originRow..t.originRow + 1) {
+            for (c in t.originCol..t.originCol + 1) {
+                if (inBounds(c, r)) indices.add(r * cols + c)
+            }
+        }
+        return indices
     }
 
     private fun investedCost(t: Tile): Int = when (t.zone) {
@@ -345,6 +579,7 @@ class CityEngine(
         ZoneType.FIRE -> Config.COST_FIRE
         ZoneType.HOSPITAL -> Config.COST_HOSPITAL
         ZoneType.STATION -> Config.COST_STATION
+        ZoneType.SUBWAY_STATION -> Config.COST_SUBWAY_STATION
         ZoneType.AIRPORT -> Config.COST_AIRPORT
         ZoneType.HIGHWAY -> if (t.terrain == Terrain.WATER) {
             Config.COST_HIGHWAY_BRIDGE
@@ -388,6 +623,7 @@ class CityEngine(
     fun tick() {
         updateRoadAccess()
         updateRailAccess()
+        updateSubwayAccess()
         updateWater()
         updatePower()
         updateServices()
@@ -396,6 +632,7 @@ class CityEngine(
         growBuildings()
         updateOccupancy()
         updateMerges()
+        updateDisasters()
         updateHappiness()
         updateEconomy()
         updateProgression()
@@ -405,9 +642,17 @@ class CityEngine(
     fun refreshInfrastructure() {
         updateRoadAccess()
         updateRailAccess()
+        updateSubwayAccess()
         updateWater()
         updatePower()
         updateServices()
+        refreshDisasterCounts()
+    }
+
+    /** Keeps the public fire/crime tallies in step after a build or a load. */
+    private fun refreshDisasterCounts() {
+        activeFires = countTiles { it.fire > 0 }
+        activeCrime = countTiles { it.crime > 0 }
     }
 
     private fun updateRoadAccess() {
@@ -546,6 +791,61 @@ class CityEngine(
     }
 
     /**
+     * Tunnels join into lines underground. A line only counts once two or more
+     * tunnel tiles touch; stations sitting on or beside a live line then pull
+     * riders in from every lot within walking range.
+     */
+    private fun updateSubwayAccess() {
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                grid[r][c].subwayConnected = false
+                grid[r][c].subwayAccess = false
+            }
+        }
+
+        val seen = Array(rows) { BooleanArray(cols) }
+        for (r0 in 0 until rows) {
+            for (c0 in 0 until cols) {
+                if (!grid[r0][c0].subway || seen[r0][c0]) continue
+                val component = ArrayList<Int>()
+                val queue = ArrayDeque<Int>()
+                seen[r0][c0] = true
+                queue.addLast(r0 * cols + c0)
+                while (queue.isNotEmpty()) {
+                    val idx = queue.removeFirst()
+                    component.add(idx)
+                    val c = idx % cols
+                    val r = idx / cols
+                    for (dir in 0 until 4) {
+                        val nc = c + DC[dir]
+                        val nr = r + DR[dir]
+                        if (!inBounds(nc, nr) || seen[nr][nc]) continue
+                        if (!grid[nr][nc].subway) continue
+                        seen[nr][nc] = true
+                        queue.addLast(nr * cols + nc)
+                    }
+                }
+                if (component.size < 2) continue
+                for (idx in component) grid[idx / cols][idx % cols].subwayConnected = true
+            }
+        }
+
+        for (sr in 0 until rows) {
+            for (sc in 0 until cols) {
+                if (grid[sr][sc].zone != ZoneType.SUBWAY_STATION) continue
+                if (!subwayLineAt(sc, sr)) continue
+                for (r in max(0, sr - Config.SUBWAY_RANGE)..min(rows - 1, sr + Config.SUBWAY_RANGE)) {
+                    for (c in max(0, sc - Config.SUBWAY_RANGE)..min(cols - 1, sc + Config.SUBWAY_RANGE)) {
+                        if (abs(c - sc) + abs(r - sr) <= Config.SUBWAY_RANGE) {
+                            grid[r][c].subwayAccess = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Water towers pipe water to every tile within range, and to any lot beside
      * a water main that reaches back to a tower. Mains may run under the river.
      */
@@ -631,11 +931,16 @@ class CityEngine(
         var healthServed = 0
         for (r in 0 until rows) {
             for (c in 0 until cols) {
-                if (!grid[r][c].developed) continue
+                val t = grid[r][c]
+                // per-tile cover drives fires, crime and the info tool
+                t.policeCovered = servedBy(police, c, r, Config.POLICE_RANGE)
+                t.fireCovered = servedBy(fire, c, r, Config.FIRE_RANGE)
+                t.healthCovered = servedBy(health, c, r, Config.HOSPITAL_RANGE)
+                if (!t.developed) continue
                 developed++
-                if (servedBy(police, c, r, Config.POLICE_RANGE)) policeServed++
-                if (servedBy(fire, c, r, Config.FIRE_RANGE)) fireServed++
-                if (servedBy(health, c, r, Config.HOSPITAL_RANGE)) healthServed++
+                if (t.policeCovered) policeServed++
+                if (t.fireCovered) fireServed++
+                if (t.healthCovered) healthServed++
             }
         }
         policeCoverage = if (developed == 0) 0f else policeServed.toFloat() / developed
@@ -676,16 +981,19 @@ class CityEngine(
 
         demandR = clamp(
             Config.DEMAND_BASE_R -
+                activeFires * 0.02f -
                 (housingCap - population) * 0.018f -
                 housingFill * 0.12f +
                 (jobs - population) * 0.004f +
                 railCount * 0.004f +
-                stationCount * 0.02f,
+                stationCount * 0.02f +
+                subwayStationCount * 0.025f,
             -1f,
             1f
         )
         demandC = clamp(
-            Config.DEMAND_BASE_C +
+            Config.DEMAND_BASE_C -
+                activeCrime * 0.008f +
                 (population * 0.20f - comCap * 0.85f) / 45f +
                 airportCount * 0.30f +
                 highwayCount * 0.03f,
@@ -714,6 +1022,7 @@ class CityEngine(
                 val t = grid[r][c]
                 if (!t.zone.isZone || t.level > 0) continue
                 if (!t.powered || !t.roadAccess || !t.watered) continue
+                if (t.fire > 0) continue
                 if (demandFor(t.zone) <= 0.04f) continue
                 candidates.add(r * cols + c)
             }
@@ -726,7 +1035,7 @@ class CityEngine(
             val t = grid[idx / cols][idx % cols]
             val demand = demandFor(t.zone)
             var chance = Config.GROWTH_CHANCE * (0.45f + 0.55f * demand)
-            if (t.railAccess) chance *= 1.3f
+            if (t.transitAccess) chance *= 1.3f
             if (rng.nextFloat() < chance) {
                 t.level = 1
                 t.variant = rng.nextInt(4)
@@ -748,9 +1057,9 @@ class CityEngine(
                 val t = grid[r][c]
                 if (t.zone == ZoneType.RESIDENTIAL && t.level > 0) {
                     val cap = capacityForTile(t)
-                    if (t.powered && t.roadAccess && t.watered) {
+                    if (t.powered && t.roadAccess && t.watered && t.fire == 0) {
                         t.distress = max(0, t.distress - 1)
-                        t.maturity += if (t.railAccess) 2 else 1
+                        t.maturity += if (t.transitAccess) 2 else 1
                         val step = max(
                             1,
                             (cap * 0.12f * (0.55f + max(0f, demandR)) *
@@ -784,9 +1093,9 @@ class CityEngine(
                 val t = grid[r][c]
                 if ((t.zone == ZoneType.COMMERCIAL || t.zone == ZoneType.INDUSTRIAL) && t.level > 0) {
                     val cap = capacityForTile(t)
-                    if (t.powered && t.roadAccess && t.watered) {
+                    if (t.powered && t.roadAccess && t.watered && t.fire == 0) {
                         t.distress = max(0, t.distress - 1)
-                        t.maturity += if (t.railAccess) 2 else 1
+                        t.maturity += if (t.transitAccess) 2 else 1
                         val target = (cap * workerRatio).roundToInt()
                         val step = max(1, (cap * 0.14f).roundToInt())
                         t.jobs = if (t.jobs < target) {
@@ -831,6 +1140,7 @@ class CityEngine(
                         t.maturity >= Config.UPGRADE_DAYS * t.level &&
                         occupied >= cap * 0.8f &&
                         t.watered &&
+                        t.fire == 0 &&
                         demandFor(t.zone) > 0.05f &&
                         rng.nextFloat() < upgradeChance
                     ) {
@@ -877,10 +1187,141 @@ class CityEngine(
         }
     }
 
-    private fun ready(t: Tile): Boolean = t.powered && t.roadAccess && t.watered
+    /** A lot is ready to grow (and to merge) once it is served and not on fire. */
+    private fun ready(t: Tile): Boolean =
+        t.powered && t.roadAccess && t.watered && t.fire == 0
 
     private fun preMergeReset(t: Tile) {
         if (t.merged) unmergeBlock(t)
+    }
+
+    /**
+     * Fires and crime only take hold where the city is not covered. An
+     * unreached building can catch fire and burn down; an unpoliced block
+     * attracts crime that drains it. Crews that do reach a fire put it out and
+     * police clear crime marks on their beat.
+     */
+    private fun updateDisasters() {
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val t = grid[r][c]
+                if (t.fire > 0) {
+                    if (t.fireCovered) {
+                        t.fire = 0
+                        t.distress = max(0, t.distress - 2)
+                        events.add(CityEvent.FireOut(t.zone, c, r))
+                        continue
+                    }
+                    t.fire++
+                    val cap = capacityForTile(t)
+                    t.population = max(0, t.population - max(1, cap / 3))
+                    t.jobs = max(0, t.jobs - max(1, cap / 3))
+                    t.distress += 2
+                    if (t.fire > Config.FIRE_BURN_DAYS) {
+                        val zone = t.zone
+                        for (b in blockTiles(t)) {
+                            b.level = 0
+                            b.population = 0
+                            b.jobs = 0
+                            b.fire = 0
+                            b.distress = Config.DISTRESS_DAYS
+                            b.merged = false
+                            b.originCol = -1
+                            b.originRow = -1
+                        }
+                        events.add(CityEvent.FireDestroyed(zone, c, r))
+                    }
+                    continue
+                }
+                if (t.crime > 0) {
+                    if (t.policeCovered) {
+                        t.crime = max(0, t.crime - 3)
+                    } else {
+                        t.crime--
+                        val cap = capacityForTile(t)
+                        if (cap > 0) {
+                            t.population = max(0, t.population - max(1, cap / 16))
+                            t.jobs = max(0, t.jobs - max(1, cap / 16))
+                        }
+                    }
+                }
+            }
+        }
+
+        // new incidents: only buildings that no station reaches are at risk
+        // Disasters only begin once the city can answer them: until the fire
+        // and police tools are earned, early settlements are left in peace.
+        val fireDanger = isUnlocked(Tool.FIRE)
+        val crimeDanger = isUnlocked(Tool.POLICE)
+        var fires = countTiles { it.fire > 0 }
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val t = grid[r][c]
+                if (!t.developed || t.fire > 0) continue
+                if (fireDanger && !t.fireCovered && fires < Config.MAX_ACTIVE_FIRES) {
+                    if (rng.nextFloat() < Config.FIRE_CHANCE * (1f + pollution * 0.5f)) {
+                        t.fire = 1
+                        fires++
+                        events.add(CityEvent.FireStarted(t.zone, c, r))
+                        continue
+                    }
+                }
+                if (crimeDanger && t.crime == 0 && !t.policeCovered &&
+                    rng.nextFloat() < Config.CRIME_CHANCE
+                ) {
+                    t.crime = Config.CRIME_DAYS
+                }
+            }
+        }
+
+        // damage above moved people out after the occupancy pass re-tallied it
+        var popTotal = 0
+        var jobTotal = 0
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                popTotal += grid[r][c].population
+                jobTotal += grid[r][c].jobs
+            }
+        }
+        population = popTotal
+        jobs = jobTotal
+
+        activeFires = countTiles { it.fire > 0 }
+        activeCrime = countTiles { it.crime > 0 }
+        val stage = when {
+            activeCrime >= Config.CRIME_WAVE * 2 -> 3
+            activeCrime >= Config.CRIME_WAVE -> 2
+            activeCrime > 0 -> 1
+            else -> 0
+        }
+        if (stage > crimeStage) {
+            crimeStage = stage
+            var crimeCol = -1
+            var crimeRow = -1
+            for (r in 0 until rows) {
+                for (c in 0 until cols) {
+                    if (crimeCol < 0 && grid[r][c].crime > 0) {
+                        crimeCol = c
+                        crimeRow = r
+                    }
+                }
+            }
+            events.add(
+                CityEvent.CrimeReported(
+                    when (stage) {
+                        3 -> "Crime is everywhere - $activeCrime buildings hit. Build POLICE."
+                        2 -> "A crime wave: $activeCrime buildings hit, police cover is thin"
+                        else -> "Crime reported - POLICE within ${Config.POLICE_RANGE} tiles stops it"
+                    },
+                    activeCrime,
+                    stage,
+                    crimeCol,
+                    crimeRow
+                )
+            )
+        } else if (stage == 0) {
+            crimeStage = 0
+        }
     }
 
     private fun updateHappiness() {
@@ -908,15 +1349,21 @@ class CityEngine(
             policeCoverage * 5f +
             fireCoverage * 4f +
             healthCoverage * 5f +
-            min(4f, railCount * 0.2f) -
+            min(4f, railCount * 0.2f) +
+            min(6f, subwayStationCount * 1.6f) -
             pollution * 45f -
             unemployment * 26f -
+            (taxRate - Config.TAX_DEFAULT) * Config.TAX_HAPPINESS_WEIGHT -
+            min(15f, activeFires * 6f + activeCrime * 0.4f) -
             if (funds < 0) 12f else 0f
         happiness = clamp(happiness + (target - happiness) * 0.12f, 0f, 100f)
     }
 
+    /** Citizens pay a share of their income set by [taxRate]; 10% is the baseline. */
+    private fun taxMultiplier(): Float = taxRate / Config.TAX_DEFAULT.toFloat()
+
     private fun dailyIncome(): Float =
-        population * Config.TAX_PER_RESIDENT + jobs * Config.TAX_PER_JOB
+        (population * Config.TAX_PER_RESIDENT + jobs * Config.TAX_PER_JOB) * taxMultiplier()
 
     private fun dailyExpenses(): Float =
         roadCount * Config.UPKEEP_ROAD +
@@ -925,6 +1372,8 @@ class CityEngine(
             pipeCount * Config.UPKEEP_PIPE +
             powerlineCount * Config.UPKEEP_POWERLINE +
             stationCount * Config.UPKEEP_STATION +
+            subwayCount * Config.UPKEEP_SUBWAY +
+            subwayStationCount * Config.UPKEEP_SUBWAY_STATION +
             parkCount * Config.UPKEEP_PARK +
             plantCount * Config.UPKEEP_PLANT +
             waterCount * Config.UPKEEP_WATERWORKS +
@@ -1053,7 +1502,8 @@ class CityEngine(
      * minus the upkeep its structure costs. Negative means the tile is a drain.
      */
     fun incomePerTick(t: Tile): Float {
-        val tax = t.population * Config.TAX_PER_RESIDENT + t.jobs * Config.TAX_PER_JOB
+        val tax = (t.population * Config.TAX_PER_RESIDENT + t.jobs * Config.TAX_PER_JOB) *
+            taxMultiplier()
         val upkeep = when (t.zone) {
             ZoneType.ROAD -> Config.UPKEEP_ROAD
             ZoneType.HIGHWAY -> Config.UPKEEP_HIGHWAY
@@ -1065,13 +1515,15 @@ class CityEngine(
             ZoneType.FIRE -> Config.UPKEEP_FIRE
             ZoneType.HOSPITAL -> Config.UPKEEP_HOSPITAL
             ZoneType.STATION -> Config.UPKEEP_STATION
+            ZoneType.SUBWAY_STATION -> Config.UPKEEP_SUBWAY_STATION
             ZoneType.AIRPORT -> Config.UPKEEP_AIRPORT
             ZoneType.RESIDENTIAL,
             ZoneType.COMMERCIAL,
             ZoneType.INDUSTRIAL -> if (t.level > 0) Config.UPKEEP_BUILDING else 0f
             else -> 0f
         } + (if (t.pipe) Config.UPKEEP_PIPE else 0f) +
-            (if (t.powerline) Config.UPKEEP_POWERLINE else 0f)
+            (if (t.powerline) Config.UPKEEP_POWERLINE else 0f) +
+            (if (t.subway) Config.UPKEEP_SUBWAY else 0f)
         return tax - upkeep
     }
 
@@ -1123,7 +1575,7 @@ class CityEngine(
 
     fun save(): String {
         val sb = StringBuilder(4096)
-        sb.append("CC5|")
+        sb.append("CC7|")
         sb.append(funds).append('|')
         sb.append(day).append('|')
         sb.append(month).append('|')
@@ -1133,6 +1585,7 @@ class CityEngine(
         sb.append(seedValue).append('|')
         sb.append(completed.joinToString(",") { it.name }).append('|')
         sb.append(stableDays).append('|')
+        sb.append(taxRate).append('|')
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 if (c != 0 || r != 0) sb.append(';')
@@ -1149,7 +1602,10 @@ class CityEngine(
                 sb.append(t.originCol).append(',')
                 sb.append(t.originRow).append(',')
                 sb.append(if (t.pipe) 1 else 0).append(',')
-                sb.append(if (t.powerline) 1 else 0)
+                sb.append(if (t.powerline) 1 else 0).append(',')
+                sb.append(if (t.subway) 1 else 0).append(',')
+                sb.append(t.fire).append(',')
+                sb.append(t.crime)
             }
         }
         return sb.toString()
@@ -1158,35 +1614,44 @@ class CityEngine(
     // ------------------------------------------------------------------ load
 
     companion object {
+        /** How many taps or drags can be taken back, newest first. */
+        private const val MAX_UNDO = 15
+
         private val MONTHS = arrayOf(
             "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
         )
         private val DC = intArrayOf(-1, 1, 0, 0)
         private val DR = intArrayOf(0, 0, -1, 1)
+        private val SAVE_VERSIONS = setOf("CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7")
 
         fun load(data: String?): CityEngine? {
             if (data.isNullOrBlank()) return null
             val parts = data.split('|')
             if (parts.size < 9) return null
             val version = parts[0]
-            if (version != "CC1" && version != "CC2" && version != "CC3" &&
-                version != "CC4" && version != "CC5"
-            ) {
-                return null
-            }
+            if (version !in SAVE_VERSIONS) return null
             val mergedSaves = version != "CC1"
-            val layeredPipes = version == "CC3" || version == "CC4" || version == "CC5"
-            val layeredWires = version == "CC4" || version == "CC5"
-            val progressive = version == "CC5"
-            if (progressive && parts.size != 11) return null
+            val layeredPipes = version != "CC1" && version != "CC2"
+            val layeredWires = version != "CC1" && version != "CC2" && version != "CC3"
+            val progressive = version == "CC5" || version == "CC6" || version == "CC7"
+            val tunnelled = version == "CC6" || version == "CC7"
+            val disasterSaves = version == "CC7"
+            if (progressive && parts.size != (if (tunnelled) 12 else 11)) return null
             return try {
                 val w = Config.COLS
                 val h = Config.ROWS
                 val engine = CityEngine(w, h, parts[7].toLongOrNull() ?: 1L)
                 // Pre-progression saves never had locked tools; keep them all open.
                 engine.legacyUnlockedAll = !progressive
-                val tilePart = parts[if (progressive) 10 else 8]
+                val tilePart = when {
+                    tunnelled -> parts[11]
+                    progressive -> parts[10]
+                    else -> parts[8]
+                }
+                if (tunnelled) {
+                    engine.taxRate = parts[10].toInt().coerceIn(Config.TAX_MIN, Config.TAX_MAX)
+                }
                 if (progressive) {
                     if (parts[8].isNotEmpty()) {
                         for (name in parts[8].split(',')) {
@@ -1216,6 +1681,8 @@ class CityEngine(
                     if (mergedSaves && f.size < 11) return null
                     if (layeredPipes && f.size < 12) return null
                     if (layeredWires && f.size < 13) return null
+                    if (tunnelled && f.size < 14) return null
+                    if (disasterSaves && f.size < 16) return null
                     val t = engine.grid[idx / w][idx % w]
                     val terrain = f[0].toInt()
                     val zone = f[1].toInt()
@@ -1242,6 +1709,11 @@ class CityEngine(
                         t.zone = ZoneType.NONE
                     }
                     if (layeredWires) t.powerline = f[12].toInt() != 0
+                    if (tunnelled) t.subway = f[13].toInt() != 0
+                    if (disasterSaves) {
+                        t.fire = f[14].toInt().coerceAtLeast(0)
+                        t.crime = f[15].toInt().coerceAtLeast(0)
+                    }
                     pop += t.population
                     job += t.jobs
                 }

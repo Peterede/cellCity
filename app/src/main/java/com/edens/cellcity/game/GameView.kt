@@ -1,4 +1,4 @@
-package com.cellcity.game
+package com.edens.cellcity.game
 
 import android.app.AlertDialog
 import android.content.Context
@@ -18,6 +18,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class GameView(context: Context) : View(context) {
 
@@ -39,6 +40,16 @@ class GameView(context: Context) : View(context) {
     private var bannerText: String = ""
     private var bannerColor: Int = Config.INK
     private var bannerTimer = 0f
+    private val bannerRect = RectF()
+
+    // the cell the newest event happened on, so its banner can jump there
+    private var eventCol = -1
+    private var eventRow = -1
+    private var eventHighlightTimer = 0f
+
+    // smooth camera move when a banner is tapped
+    private var panTargetX: Float? = null
+    private var panTargetY: Float? = null
 
     private var hudPanelBottom = 0f
     private var toolbarTop = 0f
@@ -48,7 +59,20 @@ class GameView(context: Context) : View(context) {
     private val newRect = RectF()
     private val goalsRect = RectF()
     private val soundRect = RectF()
+    private val undoRect = RectF()
+    private val advisorRect = RectF()
     private var goalsOpen = false
+
+    // advisor sheet and the tax stepper inside it
+    private var advisorOpen = false
+    private var advisorReport = CityAdvisor.report(engine)
+    private val taxDownRect = RectF()
+    private val taxUpRect = RectF()
+
+    // info tool: the cell being inspected and what it needs
+    private var inspectCol = -1
+    private var inspectRow = -1
+    private var inspectReport: TileReport? = null
 
     // long-press hover card
     private var tooltipCol = -1
@@ -114,10 +138,6 @@ class GameView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
         isFakeBoldText = true
     }
-    private val textRight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Config.INK
-        textAlign = Paint.Align.RIGHT
-    }
     private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Config.INK
         textAlign = Paint.Align.LEFT
@@ -172,6 +192,7 @@ class GameView(context: Context) : View(context) {
         running = false
         removeCallbacks(onDrawFrame)
         sound.pauseAmbient()
+        sound.pauseEffects()
         saveCity()
     }
 
@@ -192,6 +213,23 @@ class GameView(context: Context) : View(context) {
     private fun step(dt: Float) {
         time += dt
         if (bannerTimer > 0f) bannerTimer = max(0f, bannerTimer - dt)
+        if (eventHighlightTimer > 0f) eventHighlightTimer = max(0f, eventHighlightTimer - dt)
+
+        // glide the camera toward an event the player tapped
+        val targetX = panTargetX
+        val targetY = panTargetY
+        if (targetX != null && targetY != null) {
+            val cam = renderer.camera
+            val k = min(1f, dt * 8f)
+            cam.panX += (targetX - cam.panX) * k
+            cam.panY += (targetY - cam.panY) * k
+            if (abs(targetX - cam.panX) < 0.5f && abs(targetY - cam.panY) < 0.5f) {
+                cam.panX = targetX
+                cam.panY = targetY
+                panTargetX = null
+                panTargetY = null
+            }
+        }
 
         if (speed > 0) {
             val interval = 1.15f / speed
@@ -203,8 +241,20 @@ class GameView(context: Context) : View(context) {
                 handleEvents()
                 guard++
             }
+            if (guard > 0) {
+                advisorReport = CityAdvisor.report(engine)
+                if (inspectReport != null) {
+                    inspectReport = CityInspector.report(engine, inspectCol, inspectRow)
+                }
+            }
             renderer.updateCars(dt, engine)
         }
+        sound.updateScene(
+            if (speed > 0) dt else 0f,
+            engine.activeFires,
+            engine.population,
+            engine.happiness
+        )
         renderer.updateAnimations(dt)
     }
 
@@ -219,6 +269,33 @@ class GameView(context: Context) : View(context) {
                     )
                     saveCity()
                 }
+                is CityEvent.FireStarted -> {
+                    banner(
+                        "Fire! A ${event.zone.label.lowercase()} is burning - FIRE cover puts it out",
+                        coral,
+                        event.col,
+                        event.row
+                    )
+                    sound.onFireStarted()
+                }
+                is CityEvent.FireOut -> {
+                    banner("Fire crews put out the blaze", mint, event.col, event.row)
+                    sound.onFireOut()
+                }
+                is CityEvent.FireDestroyed -> {
+                    renderer.flashDeath(event.col, event.row)
+                    banner(
+                        "A building burned down - nobody reached the fire",
+                        coral,
+                        event.col,
+                        event.row
+                    )
+                    sound.playDeath()
+                }
+                is CityEvent.CrimeReported -> {
+                    banner(event.text, coral, event.col, event.row)
+                    sound.onCrimeReported()
+                }
                 is CityEvent.Notice -> banner(event.text, amber)
                 is CityEvent.MilestoneReached -> {
                     val unlockText = if (event.milestone.unlocks.isNotEmpty()) {
@@ -230,6 +307,7 @@ class GameView(context: Context) : View(context) {
                         "Goal reached: ${event.milestone.title}  +$${event.milestone.cash}$unlockText",
                         green
                     )
+                    sound.playCheer()
                 }
                 is CityEvent.Grew -> {
                     renderer.flashBirth(event.col, event.row)
@@ -255,10 +333,18 @@ class GameView(context: Context) : View(context) {
         }
     }
 
-    private fun banner(message: String, color: Int) {
+    /**
+     * Shows a message. Pass the coordinates of the cell it is about and the
+     * banner becomes tappable: it pans there and points an arrow at it.
+     */
+    private fun banner(message: String, color: Int, col: Int = -1, row: Int = -1) {
         bannerText = message
         bannerColor = color
         bannerTimer = 4.5f
+        val located = engine.inBounds(col, row)
+        eventCol = if (located) col else -1
+        eventRow = if (located) row else -1
+        if (!located) eventHighlightTimer = 0f
     }
 
     // ------------------------------------------------------------------ layout
@@ -288,21 +374,20 @@ class GameView(context: Context) : View(context) {
             toolRects[i].set(left, top, left + buttonW, top + buttonH)
         }
 
+        // five small buttons share the top-right corner, so they stay narrow
         val right = w - margin
         val top = margin
-        speedRect.set(right - 44f * density, top + 8f * density, right - 8f * density, top + 34f * density)
-        newRect.set(
-            speedRect.left - 40f * density, top + 8f * density,
-            speedRect.left - 6f * density, top + 34f * density
-        )
-        goalsRect.set(
-            newRect.left - 44f * density, top + 8f * density,
-            newRect.left - 6f * density, top + 34f * density
-        )
-        soundRect.set(
-            goalsRect.left - 40f * density, top + 8f * density,
-            goalsRect.left - 6f * density, top + 34f * density
-        )
+        val smallW = 34f * density
+        val buttonTop = top + 8f * density
+        val buttonBottom = buttonTop + 26f * density
+        speedRect.set(right - 8f * density - smallW, buttonTop, right - 8f * density, buttonBottom)
+        newRect.set(speedRect.left - gap - smallW, buttonTop, speedRect.left - gap, buttonBottom)
+        goalsRect.set(newRect.left - gap - smallW, buttonTop, newRect.left - gap, buttonBottom)
+        soundRect.set(goalsRect.left - gap - smallW, buttonTop, goalsRect.left - gap, buttonBottom)
+        undoRect.set(soundRect.left - gap - smallW, buttonTop, soundRect.left - gap, buttonBottom)
+        advisorRect.set(undoRect.left - gap - smallW, buttonTop, undoRect.left - gap, buttonBottom)
+
+        if (advisorOpen) advisorTaxRects(advisorPanel(w))
     }
 
     private fun updateCameraLayout(w: Float, h: Float) {
@@ -326,14 +411,19 @@ class GameView(context: Context) : View(context) {
         updateCameraLayout(w, h)
 
         val valid = hoverCol >= 0 && hoverRow >= 0 &&
-            (selected == Tool.BULLDOZE || engine.canBuild(selected, hoverCol, hoverRow) == BuildResult.OK)
+            (selected == Tool.BULLDOZE || selected == Tool.INFO ||
+                engine.canBuild(selected, hoverCol, hoverRow) == BuildResult.OK)
         renderer.draw(canvas, engine, selected, hoverCol, hoverRow, valid, time)
+        drawEventFocus(canvas)
+        if (selected == Tool.INFO) drawInspectorMarker(canvas)
 
         drawTopBar(canvas, w)
         drawBanner(canvas, w)
         drawToolbar(canvas, w, h)
+        if (selected == Tool.INFO) drawInspectorCard(canvas, w, h)
         if (tooltipActive) drawTooltip(canvas, w, h)
         if (goalsOpen) drawGoalsOverlay(canvas, w, h)
+        if (advisorOpen) drawAdvisorOverlay(canvas, w, h)
     }
 
     /** The bounds of the goals sheet: a tall panel across the middle of the screen. */
@@ -455,6 +545,487 @@ class GameView(context: Context) : View(context) {
         }
     }
 
+    // ------------------------------------------------------------------ advisor
+
+    /** The advisor shares the goals sheet's footprint. */
+    private fun advisorPanel(w: Float): RectF = goalsLayout(w)
+
+    private fun taxBandRect(panel: RectF): RectF {
+        val inset = 12f * density
+        return RectF(
+            panel.left + inset,
+            panel.top + 50f * density,
+            panel.right - inset,
+            panel.top + 96f * density
+        )
+    }
+
+    private fun advisorTaxRects(panel: RectF) {
+        val band = taxBandRect(panel)
+        val size = 30f * density
+        val top = band.centerY() - size * 0.5f
+        taxUpRect.set(band.right - 10f * density - size, top, band.right - 10f * density, top + size)
+        taxDownRect.set(taxUpRect.left - 6f * density - size, top, taxUpRect.left - 6f * density, top + size)
+    }
+
+    private fun moodColor(mood: CityMood): Int = when (mood) {
+        CityMood.THRIVING -> green
+        CityMood.CONTENT -> 0xFF3C97C7.toInt()
+        CityMood.UNEASY -> 0xFFD79A2B.toInt()
+        CityMood.ANGRY -> coral
+    }
+
+    private fun drawAdvisorOverlay(canvas: Canvas, w: Float, h: Float) {
+        fill.color = 0xB014263B.toInt()
+        canvas.drawRect(0f, 0f, w, h, fill)
+
+        val panel = advisorPanel(w)
+        val report = advisorReport
+        drawPanel(canvas, panel.left, panel.top, panel.right, panel.bottom, paper, 3f * density)
+
+        val pad = 12f * density
+        titlePaint.textSize = 15f * density
+        titlePaint.color = ink
+        canvas.drawText("ADVISOR", panel.left + pad, panel.top + 23f * density, titlePaint)
+
+        textBold.textSize = 11f * density
+        textBold.color = ink
+        textBold.textAlign = Paint.Align.RIGHT
+        canvas.drawText(
+            "${engine.happiness.toInt()}/100 HAPPY",
+            panel.right - pad,
+            panel.top + 22f * density,
+            textBold
+        )
+        textBold.textAlign = Paint.Align.LEFT
+
+        // mood: one big word, then what the citizens are saying
+        textBold.textSize = 10f * density
+        textBold.color = moodColor(report.mood)
+        val moodText = report.mood.label.uppercase(Locale.US)
+        canvas.drawText(moodText, panel.left + pad, panel.top + 41f * density, textBold)
+        val quoteLeft = panel.left + pad + textBold.measureText(moodText) + 8f * density
+        text.textSize = 8.5f * density
+        text.color = muted
+        canvas.drawText(
+            fitText(report.mood.quote, text, panel.right - pad - quoteLeft),
+            quoteLeft,
+            panel.top + 41f * density,
+            text
+        )
+
+        drawTaxBand(canvas, panel)
+
+        val rowsTop = panel.top + 124f * density
+        val footerReserve = 46f * density
+        val available = max(0f, panel.bottom - footerReserve - rowsTop)
+        val maxRows = min(5, max(0, (available / (34f * density)).toInt()))
+        val shown = min(maxRows, report.issues.size)
+
+        titlePaint.textSize = 9.5f * density
+        titlePaint.color = ink
+        canvas.drawText(
+            "WHAT NEEDS FIXING",
+            panel.left + pad,
+            panel.top + 116f * density,
+            titlePaint
+        )
+        if (report.issues.isNotEmpty()) {
+            textBold.textSize = 8.5f * density
+            textBold.color = muted
+            textBold.textAlign = Paint.Align.RIGHT
+            val count = if (shown < report.issues.size) {
+                "$shown of ${report.issues.size}"
+            } else {
+                "${report.issues.size}"
+            }
+            canvas.drawText(count, panel.right - pad, panel.top + 116f * density, textBold)
+            textBold.textAlign = Paint.Align.LEFT
+        }
+
+        if (shown == 0) {
+            if (available >= 24f * density) {
+                val rowRect = RectF(
+                    panel.left + pad,
+                    rowsTop,
+                    panel.right - pad,
+                    rowsTop + min(34f * density, available)
+                )
+                fill.color = 0xFFDCEBD6.toInt()
+                canvas.drawRoundRect(rowRect, 8f * density, 8f * density, fill)
+                textBold.textSize = 9.5f * density
+                textBold.color = 0xFF3E7A45.toInt()
+                canvas.drawText(
+                    "Nothing needs fixing - the city is running smoothly",
+                    rowRect.left + 10f * density,
+                    rowRect.centerY() + 3f * density,
+                    textBold
+                )
+            }
+        } else {
+            val rowH = min(38f * density, available / shown)
+            for (i in 0 until shown) {
+                val top = rowsTop + i * rowH
+                drawIssueRow(
+                    canvas,
+                    report.issues[i],
+                    RectF(
+                        panel.left + pad,
+                        top,
+                        panel.right - pad,
+                        top + rowH - 4f * density
+                    )
+                )
+            }
+        }
+
+        if (report.cheers.isNotEmpty()) {
+            text.textSize = 8f * density
+            text.color = 0xFF3E7A45.toInt()
+            canvas.drawText(
+                fitText("GOING WELL: " + report.cheers.joinToString(" · "), text, panel.width() - pad * 2),
+                panel.left + pad,
+                panel.bottom - 26f * density,
+                text
+            )
+        }
+
+        text.textSize = 8.5f * density
+        text.color = muted
+        text.textAlign = Paint.Align.CENTER
+        canvas.drawText(
+            "Adjust the tax rate with - and +  ·  tap outside to close",
+            panel.centerX(),
+            panel.bottom - 8f * density,
+            text
+        )
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawTaxBand(canvas: Canvas, panel: RectF) {
+        val band = taxBandRect(panel)
+        fill.color = 0xFFF1EAD8.toInt()
+        canvas.drawRoundRect(band, 9f * density, 9f * density, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 1.4f * density
+        canvas.drawRoundRect(band, 9f * density, 9f * density, stroke)
+
+        text.textSize = 8f * density
+        text.color = muted
+        canvas.drawText("TAX RATE", band.left + 12f * density, band.top + 16f * density, text)
+
+        textBold.textSize = 16f * density
+        textBold.color = when {
+            engine.taxRate >= 18 -> coral
+            engine.taxRate <= 6 -> 0xFF3C97C7.toInt()
+            else -> ink
+        }
+        canvas.drawText(
+            "${engine.taxRate}%",
+            band.left + 12f * density,
+            band.top + 36f * density,
+            textBold
+        )
+
+        val valueRight = band.left + 16f * density + textBold.measureText("${engine.taxRate}%")
+        val room = taxDownRect.left - 10f * density - valueRight
+        if (room > 90f * density) {
+            text.textSize = 8f * density
+            text.color = muted
+            text.textAlign = Paint.Align.RIGHT
+            canvas.drawText(
+                "+$${engine.incomePerDay.roundToInt()}/day in tax  ·  " +
+                    "-$${engine.expensesPerDay.roundToInt()}/day upkeep",
+                taxDownRect.left - 10f * density,
+                band.top + 32f * density,
+                text
+            )
+            text.textAlign = Paint.Align.LEFT
+        }
+
+        drawStepperButton(canvas, taxDownRect, plus = false, enabled = engine.taxRate > Config.TAX_MIN)
+        drawStepperButton(canvas, taxUpRect, plus = true, enabled = engine.taxRate < Config.TAX_MAX)
+    }
+
+    private fun drawStepperButton(canvas: Canvas, r: RectF, plus: Boolean, enabled: Boolean) {
+        fill.color = if (enabled) paper else 0xFFE8E0CD.toInt()
+        canvas.drawRoundRect(r, 8f * density, 8f * density, fill)
+        stroke.color = if (enabled) ink else muted
+        stroke.strokeWidth = 1.6f * density
+        canvas.drawRoundRect(r, 8f * density, 8f * density, stroke)
+
+        stroke.strokeWidth = 2.4f * density
+        val cx = r.centerX()
+        val cy = r.centerY()
+        val s = 4.6f * density
+        path.reset()
+        path.moveTo(cx - s, cy)
+        path.lineTo(cx + s, cy)
+        if (plus) {
+            path.moveTo(cx, cy - s)
+            path.lineTo(cx, cy + s)
+        }
+        canvas.drawPath(path, stroke)
+    }
+
+    private fun drawIssueRow(canvas: Canvas, issue: CityIssue, r: RectF) {
+        val accent = when (issue.level) {
+            IssueLevel.CRITICAL -> coral
+            IssueLevel.WARNING -> 0xFFD79A2B.toInt()
+            IssueLevel.NOTICE -> 0xFF3C97C7.toInt()
+        }
+        fill.color = when (issue.level) {
+            IssueLevel.CRITICAL -> 0xFFFBE3DF.toInt()
+            IssueLevel.WARNING -> 0xFFFFF2CE.toInt()
+            IssueLevel.NOTICE -> 0xFFF1EAD8.toInt()
+        }
+        canvas.drawRoundRect(r, 8f * density, 8f * density, fill)
+        stroke.color = accent
+        stroke.strokeWidth = 1.2f * density
+        canvas.drawRoundRect(r, 8f * density, 8f * density, stroke)
+
+        fill.color = accent
+        canvas.drawCircle(r.left + 11f * density, r.top + 12f * density, 4f * density, fill)
+
+        val textLeft = r.left + 23f * density
+        textBold.textSize = 9.5f * density
+        textBold.color = ink
+        canvas.drawText(
+            fitText(issue.title, textBold, r.width() - 33f * density),
+            textLeft,
+            r.top + 14f * density,
+            textBold
+        )
+        text.textSize = 8f * density
+        text.color = muted
+        canvas.drawText(
+            fitText(issue.detail, text, r.width() - 33f * density),
+            textLeft,
+            r.top + 26f * density,
+            text
+        )
+    }
+
+    // ------------------------------------------------------------------ info tool
+
+    private fun inspectAt(x: Float, y: Float) {
+        val cam = renderer.camera
+        val col = cam.screenToCol(x, y)
+        val row = cam.screenToRow(x, y)
+        if (!engine.inBounds(col, row)) return
+        val report = CityInspector.report(engine, col, row) ?: return
+        inspectCol = col
+        inspectRow = row
+        inspectReport = report
+        val now = System.currentTimeMillis()
+        if (now - lastHaptic > 70) {
+            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            lastHaptic = now
+        }
+        invalidate()
+    }
+
+    private fun clearInspect() {
+        inspectCol = -1
+        inspectRow = -1
+        inspectReport = null
+    }
+
+    private fun drawInspectorMarker(canvas: Canvas) {
+        if (inspectCol < 0 || inspectRow < 0) return
+        val cam = renderer.camera
+        val cx = cam.screenX(inspectCol.toFloat(), inspectRow.toFloat())
+        val cy = cam.screenY(inspectCol.toFloat(), inspectRow.toFloat())
+        val hw = cam.tileW * 0.5f * cam.zoom
+        val hh = cam.tileH * 0.5f * cam.zoom
+        path.reset()
+        path.moveTo(cx, cy - hh)
+        path.lineTo(cx + hw, cy)
+        path.lineTo(cx, cy + hh)
+        path.lineTo(cx - hw, cy)
+        path.close()
+        fill.color = 0x40FFD166
+        canvas.drawPath(path, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 5f * density
+        canvas.drawPath(path, stroke)
+        stroke.color = amber
+        stroke.strokeWidth = 2.4f * density
+        canvas.drawPath(path, stroke)
+    }
+
+    /** A persistent card next to the inspected cell: what it needs and why. */
+    private fun drawInspectorCard(canvas: Canvas, w: Float, h: Float) {
+        val report = inspectReport ?: return
+        if (inspectCol < 0 || inspectRow < 0) return
+        val cam = renderer.camera
+        val anchorX = cam.screenX(inspectCol.toFloat(), inspectRow.toFloat())
+        val anchorY = cam.screenY(inspectCol.toFloat(), inspectRow.toFloat())
+
+        val pad = 10f * density
+        val cardW = 238f * density
+        val lineH = 13f * density
+        val titleH = 19f * density
+        val subtitleH = 12f * density
+        val blockH = 13f * density
+        val needs = report.needs.take(4)
+        val facts = report.facts.take(4)
+
+        text.textSize = 8.5f * density
+        val adviceLines = wrap(report.advice, text, cardW - pad * 2f - 12f * density, 2)
+        val adviceH = 16f * density + max(0, adviceLines.size - 1) * 11f * density
+        val needsBlock = if (needs.isEmpty()) 0f else blockH + needs.size * lineH
+        val factsBlock = if (facts.isEmpty()) 0f else 4f * density + blockH + facts.size * lineH
+        val cardH = pad + titleH + subtitleH + needsBlock + factsBlock + 6f * density +
+            adviceH + pad
+
+        var left = anchorX + 22f * density
+        var top = anchorY - cardH - 14f * density
+        if (left + cardW > w - 8f * density) left = anchorX - cardW - 22f * density
+        left = left.coerceIn(8f * density, max(8f * density, w - cardW - 8f * density))
+        val minTop = hudPanelBottom + 6f * density
+        val maxTop = toolbarTop - cardH - 6f * density
+        top = if (maxTop < minTop) minTop else top.coerceIn(minTop, maxTop)
+
+        val right = left + cardW
+        val bottom = top + cardH
+        fill.color = ink
+        rect.set(left + 2f * density, top + 3f * density, right + 2f * density, bottom + 3f * density)
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, fill)
+        fill.color = paper
+        rect.set(left, top, right, bottom)
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 2.4f * density
+        canvas.drawRoundRect(rect, 12f * density, 12f * density, stroke)
+
+        // pointer toward the cell
+        val tipY = if (top > anchorY) top else bottom
+        val dir = if (top > anchorY) -1f else 1f
+        val tipX = anchorX.coerceIn(left + 14f * density, right - 14f * density)
+        path.reset()
+        path.moveTo(tipX, tipY)
+        path.lineTo(tipX - 6f * density, tipY + dir * 8f * density)
+        path.lineTo(tipX + 6f * density, tipY + dir * 8f * density)
+        path.close()
+        fill.color = paper
+        canvas.drawPath(path, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 2.4f * density
+        canvas.drawPath(path, stroke)
+
+        titlePaint.textSize = 12f * density
+        titlePaint.color = ink
+        canvas.drawText(
+            fitText(report.title, titlePaint, cardW - pad * 2f),
+            left + pad,
+            top + pad + 10f * density,
+            titlePaint
+        )
+        text.textSize = 7.5f * density
+        text.color = muted
+        canvas.drawText(report.subtitle, left + pad, top + pad + 10f * density + subtitleH, text)
+
+        var y = top + pad + titleH + subtitleH
+        if (needs.isNotEmpty()) {
+            titlePaint.textSize = 8.5f * density
+            titlePaint.color = muted
+            canvas.drawText("NEEDS", left + pad, y, titlePaint)
+            y += blockH
+            for (need in needs) {
+                val dotColor = when (need.state) {
+                    NeedState.MET -> green
+                    NeedState.MISSING -> coral
+                    NeedState.OPTIONAL -> muted
+                }
+                fill.color = dotColor
+                canvas.drawCircle(left + pad + 3f * density, y - 3f * density, 3.4f * density, fill)
+                text.textSize = 9f * density
+                text.color = ink
+                canvas.drawText(
+                    fitText(need.label, text, cardW - pad * 2f - 74f * density),
+                    left + pad + 11f * density,
+                    y,
+                    text
+                )
+                textBold.textSize = 8.5f * density
+                textBold.color = dotColor
+                textBold.textAlign = Paint.Align.RIGHT
+                canvas.drawText(need.detail, right - pad, y, textBold)
+                textBold.textAlign = Paint.Align.LEFT
+                y += lineH
+            }
+        }
+
+        if (facts.isNotEmpty()) {
+            y += 4f * density
+            titlePaint.textSize = 8.5f * density
+            titlePaint.color = muted
+            canvas.drawText("DETAILS", left + pad, y, titlePaint)
+            y += blockH
+            for (fact in facts) {
+                text.textSize = 8.5f * density
+                text.color = muted
+                canvas.drawText(
+                    fitText(fact.label, text, cardW - pad * 2f - 96f * density),
+                    left + pad,
+                    y,
+                    text
+                )
+                textBold.textSize = 8.5f * density
+                textBold.color = ink
+                textBold.textAlign = Paint.Align.RIGHT
+                canvas.drawText(fact.value, right - pad, y, textBold)
+                textBold.textAlign = Paint.Align.LEFT
+                y += lineH
+            }
+        }
+
+        y += 6f * density
+        fill.color = if (report.broken) 0xFFFBE3DF.toInt() else 0xFFDCEBD6.toInt()
+        rect.set(left + pad, y, right - pad, y + adviceH)
+        canvas.drawRoundRect(rect, 8f * density, 8f * density, fill)
+        stroke.color = if (report.broken) coral else green
+        stroke.strokeWidth = 1.2f * density
+        canvas.drawRoundRect(rect, 8f * density, 8f * density, stroke)
+
+        text.textSize = 8.5f * density
+        text.color = ink
+        var ty = y + 12f * density
+        for (line in adviceLines) {
+            canvas.drawText(line, left + pad + 6f * density, ty, text)
+            ty += 11f * density
+        }
+    }
+
+    /** Greedy word wrap for the advice line, keeping at most [maxLines] lines. */
+    private fun wrap(value: String, paint: Paint, maxWidth: Float, maxLines: Int): List<String> {
+        if (maxLines <= 1) return listOf(fitText(value, paint, maxWidth))
+        val words = value.split(' ')
+        val lines = ArrayList<String>()
+        var current = ""
+        for (i in words.indices) {
+            val candidate = if (current.isEmpty()) words[i] else "$current ${words[i]}"
+            if (paint.measureText(candidate) <= maxWidth) {
+                current = candidate
+            } else {
+                if (lines.size == maxLines - 1) {
+                    current = if (current.isEmpty()) words[i] else "$current ${words[i]}"
+                    for (j in i + 1 until words.size) current += " ${words[j]}"
+                    break
+                }
+                if (current.isNotEmpty()) lines.add(current)
+                current = words[i]
+            }
+        }
+        if (current.isNotEmpty()) lines.add(current)
+        if (lines.size > maxLines) return lines.take(maxLines)
+        if (lines.isNotEmpty()) lines[lines.size - 1] = fitText(lines[lines.size - 1], paint, maxWidth)
+        return lines
+    }
+
+    // ------------------------------------------------------------------ top bar
+
     private fun drawTopBar(canvas: Canvas, w: Float) {
         val margin = 9f * density
         val top = margin
@@ -491,43 +1062,102 @@ class GameView(context: Context) : View(context) {
         drawSmallButton(canvas, soundRect)
         drawSoundIcon(canvas, soundRect)
 
-        textRight.textSize = 10f * density
-        textRight.color = ink
-        canvas.drawText(engine.dateLabel, soundRect.left - 8f * density, top + 23f * density, textRight)
+        // undo the last tap or drag
+        drawSmallButton(canvas, undoRect)
+        textBold.textSize = 7.5f * density
+        textBold.color = if (engine.canUndo) ink else muted
+        textBold.textAlign = Paint.Align.CENTER
+        canvas.drawText("UNDO", undoRect.centerX(), undoRect.centerY() + 2.5f * density, textBold)
+        textBold.textAlign = Paint.Align.LEFT
+
+        // advisor
+        drawSmallButton(canvas, advisorRect)
+        drawAdvisorIcon(canvas, advisorRect)
+        drawAdvisorBadge(canvas, advisorRect)
 
         // funds
         val fundsY = top + 52f * density
         textBold.textSize = 17f * density
         textBold.color = if (engine.funds < 0) coral else ink
         canvas.drawText(money(engine.funds), margin + pad, fundsY, textBold)
+
+        // a quiet line under the treasury: the date and what citizens are taxed
+        val colRight = w - margin - pad
+        var labelX = margin + pad
+        val labelLimit = colRight - 146f * density
+        val labels = arrayOf(
+            "TREASURY" to muted,
+            engine.dateLabel to muted,
+            "TAX ${engine.taxRate}%" to when {
+                engine.taxRate >= 18 -> coral
+                engine.taxRate <= 6 -> 0xFF3C97C7.toInt()
+                else -> ink
+            }
+        )
         text.textSize = 8f * density
+        for (i in labels.indices) {
+            val piece = (if (i == 0) "" else "  ·  ") + labels[i].first
+            if (labelX + text.measureText(piece) > labelLimit) break
+            text.color = labels[i].second
+            canvas.drawText(piece, labelX, fundsY + 13f * density, text)
+            labelX += text.measureText(piece)
+        }
         text.color = muted
-        canvas.drawText("TREASURY", margin + pad, fundsY + 13f * density, text)
 
         // population / jobs / happiness
-        val colRight = w - margin - pad
         drawStat(canvas, colRight, top + 38f * density, "POP", engine.population.toString(), ink)
         drawStat(canvas, colRight - 52f * density, top + 38f * density, "JOBS", engine.jobs.toString(), ink)
         drawHappiness(canvas, colRight - 104f * density, top + 38f * density)
 
         // demand strip
         drawDemand(canvas, margin + pad, bottom - 11f * density, w - margin - pad, 9f * density)
+    }
 
-        // pause chip
-        if (speed == 0) {
-            textBold.textSize = 8.5f * density
-            textBold.textAlign = Paint.Align.CENTER
-            val cx = w * 0.5f
-            val cy = top + 24f * density
-            rect.set(cx - 34f * density, cy - 9f * density, cx + 34f * density, cy + 9f * density)
-            fill.color = amber
-            canvas.drawRoundRect(rect, 7f * density, 7f * density, fill)
-            stroke.color = ink
-            stroke.strokeWidth = 1.5f * density
-            canvas.drawRoundRect(rect, 7f * density, 7f * density, stroke)
-            canvas.drawText("PAUSED", cx, cy + 3f * density, textBold)
-            textBold.textAlign = Paint.Align.LEFT
-        }
+    private fun drawAdvisorIcon(canvas: Canvas, r: RectF) {
+        val cx = r.centerX()
+        val cy = r.centerY() - 0.5f * density
+        val s = 4.8f * density
+        path.reset()
+        path.moveTo(cx - s * 1.15f, cy - s)
+        path.lineTo(cx + s * 1.15f, cy - s)
+        path.lineTo(cx + s * 1.15f, cy + s * 0.35f)
+        path.lineTo(cx - s * 0.15f, cy + s * 0.35f)
+        path.lineTo(cx - s * 0.62f, cy + s * 1.05f)
+        path.lineTo(cx - s * 0.62f, cy + s * 0.35f)
+        path.lineTo(cx - s * 1.15f, cy + s * 0.35f)
+        path.close()
+        fill.color = amber
+        canvas.drawPath(path, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 1.5f * density
+        canvas.drawPath(path, stroke)
+
+        fill.color = ink
+        canvas.drawCircle(cx - s * 0.42f, cy - s * 0.34f, 0.85f * density, fill)
+        canvas.drawCircle(cx + s * 0.42f, cy - s * 0.34f, 0.85f * density, fill)
+        stroke.strokeWidth = 1f * density
+        path.reset()
+        path.moveTo(cx - s * 0.36f, cy + s * 0.02f)
+        path.quadTo(cx, cy + s * 0.34f, cx + s * 0.36f, cy + s * 0.02f)
+        canvas.drawPath(path, stroke)
+    }
+
+    /** A small count of open issues, so the mayor knows when to look. */
+    private fun drawAdvisorBadge(canvas: Canvas, r: RectF) {
+        val count = advisorReport.issues.size
+        if (count == 0) return
+        val cx = r.right - 2f * density
+        val cy = r.top + 3f * density
+        fill.color = coral
+        canvas.drawCircle(cx, cy, 6.5f * density, fill)
+        stroke.color = ink
+        stroke.strokeWidth = 1.2f * density
+        canvas.drawCircle(cx, cy, 6.5f * density, stroke)
+        textBold.textSize = 7.5f * density
+        textBold.color = paper
+        textBold.textAlign = Paint.Align.CENTER
+        canvas.drawText(count.toString(), cx, cy + 2.6f * density, textBold)
+        textBold.textAlign = Paint.Align.LEFT
     }
 
     private fun drawStat(canvas: Canvas, right: Float, y: Float, label: String, value: String, color: Int) {
@@ -621,22 +1251,68 @@ class GameView(context: Context) : View(context) {
         val h = 26f * density
         val left = margin
         val right = w - margin
+        bannerRect.set(left, top, right, top + h)
         drawPanel(canvas, left, top, right, top + h, paper, 2f * density)
         fill.color = bannerColor
         rect.set(left + 8f * density, top + 8f * density, left + 14f * density, top + 18f * density)
         canvas.drawRoundRect(rect, 2f * density, 2f * density, fill)
 
+        val jump = eventCol >= 0 && eventRow >= 0
         textBold.textSize = 9.5f * density
         textBold.color = ink
         textBold.textAlign = Paint.Align.LEFT
-        val available = right - left - 34f * density
+        val available = right - left - if (jump) 56f * density else 34f * density
         canvas.drawText(
             fitText(bannerText, textBold, available),
             left + 20f * density,
             top + h * 0.63f,
             textBold
         )
+
+        if (jump) {
+            textBold.textSize = 8f * density
+            textBold.color = bannerColor
+            textBold.textAlign = Paint.Align.RIGHT
+            canvas.drawText("VIEW >", right - 9f * density, top + h * 0.63f, textBold)
+            textBold.textAlign = Paint.Align.LEFT
+        }
     }
+
+    /** A bobbing arrow over the cell behind the newest event banner. */
+    private fun drawEventFocus(canvas: Canvas) {
+        if (eventHighlightTimer <= 0f || eventCol < 0 || eventRow < 0) return
+        val cam = renderer.camera
+        val cx = cam.screenX(eventCol.toFloat(), eventRow.toFloat())
+        val cy = cam.screenY(eventCol.toFloat(), eventRow.toFloat())
+        val hw = cam.tileW * 0.5f * cam.zoom
+        val hh = cam.tileH * 0.5f * cam.zoom
+        val fade = min(1f, eventHighlightTimer / 0.6f)
+        val alpha = (220 * fade).toInt()
+        val pulse = 1f + 0.12f * sin(time * 5f)
+
+        stroke.color = withAlpha(amber, (150 * fade).toInt())
+        stroke.strokeWidth = 2f * density
+        rect.set(cx - hw * pulse, cy - hh * pulse, cx + hw * pulse, cy + hh * pulse)
+        canvas.drawOval(rect, stroke)
+
+        val bob = sin(time * 5f) * 3f * density
+        val s = 8f * density
+        val tipY = cy - hh - 7f * density + bob
+        val topY = tipY - s * 1.7f
+        path.reset()
+        path.moveTo(cx, tipY)
+        path.lineTo(cx - s * 0.85f, topY)
+        path.lineTo(cx + s * 0.85f, topY)
+        path.close()
+        fill.color = withAlpha(amber, alpha)
+        canvas.drawPath(path, fill)
+        stroke.color = withAlpha(ink, alpha)
+        stroke.strokeWidth = 2f * density
+        canvas.drawPath(path, stroke)
+    }
+
+    private fun withAlpha(color: Int, alpha: Int): Int =
+        (color and 0x00FFFFFF) or (alpha.coerceIn(0, 255) shl 24)
 
     private fun drawTooltip(canvas: Canvas, w: Float, h: Float) {
         val tile = engine.tile(tooltipCol, tooltipRow) ?: return
@@ -653,6 +1329,10 @@ class GameView(context: Context) : View(context) {
             rows.add("Level" to if (tile.level == 0) "vacant" else "L${tile.level} of ${Config.MAX_LEVEL}")
             rows.add("Inside" to "${tile.population + tile.jobs}")
             rows.add("Road / power / water" to "${tick(tile.roadAccess)}  ${tick(tile.powered)}  ${tick(tile.watered)}")
+            rows.add("Transit" to tick(tile.transitAccess))
+        }
+        if (tile.subway) {
+            rows.add("Subway" to if (tile.subwayConnected) "tunnel" else "stub")
         }
         rows.add("Neighbours" to "R${counts.developed} C${counts.zoned} B${counts.built} / 8")
 
@@ -736,19 +1416,40 @@ class GameView(context: Context) : View(context) {
         stroke.strokeWidth = 3f * density
         canvas.drawRoundRect(rect, 16f * density, 16f * density, stroke)
 
-        // hint
+        // hint, with the pause chip at the end of the same row
+        val paused = speed == 0
+        val chipW = 62f * density
         textBold.textSize = 10f * density
         textBold.color = ink
         textBold.textAlign = Paint.Align.LEFT
         val hintColor = if (selected == Tool.BULLDOZE) coral else ink
         textBold.color = hintColor
+        val hintRoom = w - 28f * density - if (paused) chipW + 10f * density else 0f
         canvas.drawText(
-            fitText(hintText(), textBold, w - 28f * density),
+            fitText(hintText(), textBold, hintRoom),
             14f * density,
             top + 16f * density,
             textBold
         )
         textBold.color = ink
+
+        if (paused) {
+            rect.set(
+                w - 14f * density - chipW,
+                top + 2f * density,
+                w - 14f * density,
+                top + 20f * density
+            )
+            fill.color = amber
+            canvas.drawRoundRect(rect, 7f * density, 7f * density, fill)
+            stroke.color = ink
+            stroke.strokeWidth = 1.3f * density
+            canvas.drawRoundRect(rect, 7f * density, 7f * density, stroke)
+            textBold.textSize = 8.5f * density
+            textBold.textAlign = Paint.Align.CENTER
+            canvas.drawText("PAUSED", rect.centerX(), rect.centerY() + 3f * density, textBold)
+            textBold.textAlign = Paint.Align.LEFT
+        }
 
         for (i in Tool.values().indices) {
             drawToolButton(canvas, Tool.values()[i], toolRects[i])
@@ -925,6 +1626,62 @@ class GameView(context: Context) : View(context) {
                 path.moveTo(cx - s, cy + s * 0.24f)
                 path.lineTo(cx + s, cy + s * 0.24f)
                 canvas.drawPath(path, stroke)
+            }
+            Tool.SUBWAY -> {
+                // tunnel mouth with the line running off to the side
+                dash.color = Config.TUNNEL
+                dash.strokeWidth = 1.9f * density
+                path.reset()
+                path.moveTo(cx - s * 0.95f, cy + s * 0.6f)
+                path.lineTo(cx - s * 0.5f, cy + s * 0.38f)
+                path.moveTo(cx + s * 0.5f, cy - s * 0.38f)
+                path.lineTo(cx + s * 0.95f, cy - s * 0.6f)
+                canvas.drawPath(path, dash)
+
+                stroke.color = color
+                stroke.strokeWidth = 1.8f * density
+                fill.color = 0xFF233A42.toInt()
+                rect.set(cx - s * 0.52f, cy - s * 0.76f, cx + s * 0.52f, cy + s * 0.5f)
+                canvas.drawRoundRect(rect, s * 0.5f, s * 0.5f, fill)
+                canvas.drawRoundRect(rect, s * 0.5f, s * 0.5f, stroke)
+                stroke.color = Config.TUNNEL
+                stroke.strokeWidth = 2f * density
+                rect.set(cx - s * 0.32f, cy - s * 0.5f, cx + s * 0.32f, cy + s * 0.46f)
+                canvas.drawRoundRect(rect, s * 0.32f, s * 0.32f, stroke)
+            }
+            Tool.SUBWAY_STATION -> {
+                // stair entrance under a canopy, with the round platform sign
+                stroke.color = color
+                stroke.strokeWidth = 1.5f * density
+                fill.color = 0xFF1B2C33.toInt()
+                rect.set(cx - s * 0.55f, cy - s * 0.05f, cx + s * 0.55f, cy + s * 0.55f)
+                canvas.drawRect(rect, fill)
+                canvas.drawRect(rect, stroke)
+
+                path.reset()
+                path.moveTo(cx - s * 0.9f, cy - s * 0.05f)
+                path.lineTo(cx, cy - s * 0.42f)
+                path.lineTo(cx + s * 0.9f, cy - s * 0.05f)
+                path.lineTo(cx, cy + s * 0.28f)
+                path.close()
+                fill.color = 0xFF9FD8D6.toInt()
+                canvas.drawPath(path, fill)
+                stroke.color = Config.TUNNEL
+                canvas.drawPath(path, stroke)
+
+                stroke.strokeWidth = 1.2f * density
+                path.reset()
+                path.moveTo(cx + s * 0.78f, cy - s * 0.05f)
+                path.lineTo(cx + s * 0.78f, cy - s * 0.6f)
+                canvas.drawPath(path, stroke)
+                fill.color = Config.TUNNEL
+                canvas.drawCircle(cx + s * 0.78f, cy - s * 0.72f, s * 0.3f, fill)
+                stroke.color = color
+                stroke.strokeWidth = 1.2f * density
+                canvas.drawCircle(cx + s * 0.78f, cy - s * 0.72f, s * 0.3f, stroke)
+                textCenter.textSize = 6.2f * density
+                textCenter.color = paper
+                canvas.drawText("U", cx + s * 0.78f, cy - s * 0.62f, textCenter)
             }
             Tool.WATER -> {
                 path.reset()
@@ -1126,6 +1883,17 @@ class GameView(context: Context) : View(context) {
                 path.moveTo(cx + s * 0.4f, cy - s * 0.4f)
                 path.lineTo(cx - s * 0.4f, cy + s * 0.4f)
                 canvas.drawPath(path, stroke)
+            }
+            Tool.INFO -> {
+                stroke.color = color
+                stroke.strokeWidth = 1.7f * density
+                fill.color = paper
+                canvas.drawCircle(cx, cy, s * 0.88f, fill)
+                canvas.drawCircle(cx, cy, s * 0.88f, stroke)
+                fill.color = color
+                canvas.drawCircle(cx, cy - s * 0.4f, s * 0.15f, fill)
+                rect.set(cx - s * 0.14f, cy - s * 0.12f, cx + s * 0.14f, cy + s * 0.52f)
+                canvas.drawRoundRect(rect, s * 0.12f, s * 0.12f, fill)
             }
             Tool.PAN -> {
                 stroke.strokeWidth = 1.8f * density
@@ -1366,6 +2134,15 @@ class GameView(context: Context) : View(context) {
         if (engine.mergedBlockCount == 0 && engine.buildingCount > 8) {
             return "Four level-2 lots of a zone merge into one big building"
         }
+        if (engine.subwayCount > 0 && engine.subwayStationCount == 0) {
+            return "Tunnels need a subway station - the advisor can help"
+        }
+        if (engine.population > 60 && engine.taxRate >= 18) {
+            return "Citizens resent the ${engine.taxRate}% tax rate - try lowering it"
+        }
+        if (engine.population > 60 && engine.netPerDay < 0) {
+            return "Upkeep beats income - raise taxes in the ADVISOR panel"
+        }
         val goal = engine.nextMilestone()
         if (goal != null && engine.completedMilestones.isNotEmpty()) {
             val value = engine.milestoneValue(goal).coerceAtMost(engine.milestoneTarget(goal))
@@ -1379,6 +2156,8 @@ class GameView(context: Context) : View(context) {
             Tool.HIGHWAY -> "HWY $120 - four lanes: faster traffic, more trade; $300 over water"
             Tool.POWERLINE -> "WIRE $10 - buried cable carries power across open ground"
             Tool.RAIL -> "RAIL $40 - lines boost the lots beside them"
+            Tool.SUBWAY -> "SUBWAY $55 - tunnels run under anything; $160 under the river"
+            Tool.SUBWAY_STATION -> "SUB STN $650 - place it beside a subway tunnel to bring riders"
             Tool.RESIDENTIAL -> "RES $40 - homes fill up, then upgrade"
             Tool.COMMERCIAL -> "COM $50 - shops need residents nearby"
             Tool.INDUSTRIAL -> "IND $60 - jobs and taxes, but pollution"
@@ -1390,6 +2169,7 @@ class GameView(context: Context) : View(context) {
             Tool.FIRE -> "FIRE $800 - protects the neighbourhood"
             Tool.HOSPITAL -> "HOSP $1200 - healthy citizens are happy ones"
             Tool.AIRPORT -> "AIR $6000 - build on a clear 2x2 lot beside a road"
+            Tool.INFO -> "INFO - tap any cell to see what it needs"
         }
     }
 
@@ -1404,6 +2184,21 @@ class GameView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 val x = event.x
                 val y = event.y
+                if (advisorOpen) {
+                    if (taxDownRect.contains(x, y)) {
+                        adjustTax(-1)
+                        performClick()
+                        return true
+                    }
+                    if (taxUpRect.contains(x, y)) {
+                        adjustTax(1)
+                        performClick()
+                        return true
+                    }
+                    advisorOpen = false
+                    performClick()
+                    return true
+                }
                 if (goalsOpen) {
                     goalsOpen = false
                     performClick()
@@ -1421,8 +2216,18 @@ class GameView(context: Context) : View(context) {
                     }
                     if (goalsRect.contains(x, y)) {
                         goalsOpen = true
+                        advisorOpen = false
                         tooltipActive = false
                         performClick()
+                        return true
+                    }
+                    if (advisorRect.contains(x, y)) {
+                        advisorReport = CityAdvisor.report(engine)
+                        advisorOpen = true
+                        goalsOpen = false
+                        tooltipActive = false
+                        performClick()
+                        invalidate()
                         return true
                     }
                     if (soundRect.contains(x, y)) {
@@ -1430,6 +2235,17 @@ class GameView(context: Context) : View(context) {
                         performClick()
                         return true
                     }
+                    if (undoRect.contains(x, y)) {
+                        undoLastBuild()
+                        performClick()
+                        return true
+                    }
+                    return true
+                }
+                // the event banner is a shortcut to whatever it is about
+                if (bannerTimer > 0f && bannerRect.contains(x, y)) {
+                    if (eventCol >= 0 && eventRow >= 0) focusEventCell()
+                    performClick()
                     return true
                 }
                 if (y >= toolbarTop) {
@@ -1442,6 +2258,7 @@ class GameView(context: Context) : View(context) {
                                 return true
                             }
                             selected = tool
+                            if (tool != Tool.INFO) clearInspect()
                             lastPaintCol = -1
                             lastPaintRow = -1
                             performClick()
@@ -1460,15 +2277,25 @@ class GameView(context: Context) : View(context) {
                 lastPaintRow = -1
                 didPaint = false
                 tooltipActive = false
-                mode = if (selected == Tool.PAN) MODE_PAN else MODE_PAINT
+                panTargetX = null
+                panTargetY = null
+                mode = when (selected) {
+                    Tool.PAN -> MODE_PAN
+                    Tool.INFO -> MODE_INFO
+                    else -> MODE_PAINT
+                }
                 updateHover(x, y)
                 if (mode == MODE_PAINT) {
+                    engine.beginAction()
                     postDelayed(longPressRunnable, LONG_PRESS_MS)
                 }
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount >= 2) {
+                    if (mode == MODE_PAINT) engine.endAction()
+                    panTargetX = null
+                    panTargetY = null
                     mode = MODE_PINCH
                     removeCallbacks(longPressRunnable)
                     tooltipActive = false
@@ -1496,7 +2323,7 @@ class GameView(context: Context) : View(context) {
                     lastMidX = midX
                     lastMidY = midY
                     clampCamera()
-                } else if (mode == MODE_PAN) {
+                } else if (mode == MODE_PAN || mode == MODE_INFO) {
                     val idx = event.findPointerIndex(activePointer)
                     if (idx >= 0) {
                         val x = event.getX(idx)
@@ -1556,13 +2383,18 @@ class GameView(context: Context) : View(context) {
                     paintSegment(x, y, x, y, force = true)
                 } else if (mode == MODE_PAN) {
                     updateHover(x, y)
+                } else if (mode == MODE_INFO) {
+                    if (hypot(x - downX, y - downY) <= touchSlop) inspectAt(x, y)
+                    updateHover(x, y)
                 }
+                if (mode == MODE_PAINT) engine.endAction()
                 mode = MODE_NONE
                 activePointer = -1
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressRunnable)
+                if (mode == MODE_PAINT) engine.endAction()
                 tooltipActive = false
                 mode = MODE_NONE
                 activePointer = -1
@@ -1581,6 +2413,61 @@ class GameView(context: Context) : View(context) {
         speed = (speed + 1) % 4
         dayTimer = 0f
         if (speed == 0) banner("City paused", amber)
+    }
+
+    private fun adjustTax(delta: Int) {
+        if (!engine.setTaxRate(engine.taxRate + delta)) return
+        advisorReport = CityAdvisor.report(engine)
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        saveCity()
+        invalidate()
+    }
+
+    private fun toggleSound() {
+        sound.setSoundEnabled(!sound.enabled)
+        prefs.edit().putBoolean(SOUND_KEY, sound.enabled).apply()
+        banner(if (sound.enabled) "Sound on" else "Sound off", if (sound.enabled) mint else muted)
+        invalidate()
+    }
+
+    /** Pans to the cell behind the newest event banner and points an arrow at it. */
+    private fun focusEventCell() {
+        if (!engine.inBounds(eventCol, eventRow)) return
+        val cam = renderer.camera
+        val maxX = (engine.cols + engine.rows) * cam.tileW * 0.5f * cam.zoom * 0.7f
+        val maxY = (engine.cols + engine.rows) * cam.tileH * 0.5f * cam.zoom * 0.7f
+        panTargetX = (-(eventCol - eventRow) * cam.tileW * 0.5f * cam.zoom)
+            .coerceIn(-maxX, maxX)
+        panTargetY = (-(eventCol + eventRow) * cam.tileH * 0.5f * cam.zoom)
+            .coerceIn(-maxY, maxY)
+        eventHighlightTimer = 6f
+        lastPaintCol = -1
+        lastPaintRow = -1
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        invalidate()
+    }
+
+    /** Puts back the tiles of the last tap or drag, and the money it cost. */
+    private fun undoLastBuild() {
+        val undone = engine.undo()
+        if (undone == null) {
+            banner("Nothing to undo", muted)
+            invalidate()
+            return
+        }
+        lastPaintCol = -1
+        lastPaintRow = -1
+        advisorReport = CityAdvisor.report(engine)
+        if (inspectReport != null) {
+            inspectReport = CityInspector.report(engine, inspectCol, inspectRow)
+        }
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        banner(
+            if (undone == "bulldoze") "Undo: bulldoze reverted" else "Undo: build reverted",
+            mint
+        )
+        saveCity()
+        invalidate()
     }
 
     private fun distance(event: MotionEvent, a: Int, b: Int): Float {
@@ -1630,6 +2517,7 @@ class GameView(context: Context) : View(context) {
         val beforeZone = tile.zone
         val beforePipe = tile.pipe
         val beforeWire = tile.powerline
+        val beforeSubway = tile.subway
         val result = engine.build(selected, col, row)
         engine.drainEvents()
         lastPaintCol = col
@@ -1640,7 +2528,9 @@ class GameView(context: Context) : View(context) {
             return
         }
         val after = engine.tile(col, row)
-        if (after?.zone != beforeZone || after.pipe != beforePipe || after.powerline != beforeWire) {
+        if (after?.zone != beforeZone || after.pipe != beforePipe ||
+            after.powerline != beforeWire || after.subway != beforeSubway
+        ) {
             val now = System.currentTimeMillis()
             if (now - lastHaptic > 70) {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -1655,6 +2545,10 @@ class GameView(context: Context) : View(context) {
                     banner("Water mains laid - run them from a tower to dry lots", Config.SKY_BLUE)
                 selected == Tool.POWERLINE && engine.powerlineCount == 1 ->
                     banner("Cables live - the grid can now cross open ground", amber)
+                selected == Tool.SUBWAY && engine.subwayCount == 1 ->
+                    banner("Tunnel dug - link two or more tiles to make a line", mint)
+                selected == Tool.SUBWAY_STATION && engine.subwayStationCount == 1 ->
+                    banner("Subway station open - nearby lots gain transit access", mint)
                 selected == Tool.STATION && engine.stationCount == 1 ->
                     banner("Train station open - nearby lots gain transit access", mint)
                 selected == Tool.AIRPORT ->
@@ -1673,10 +2567,13 @@ class GameView(context: Context) : View(context) {
                 prefs.edit().remove(SAVE_KEY).apply()
                 engine = CityEngine(seed = System.currentTimeMillis())
                 selected = Tool.ROAD
+                clearInspect()
                 hoverCol = engine.cols / 2
                 hoverRow = engine.rows / 2
                 dayTimer = 0f
                 goalsOpen = false
+                advisorOpen = false
+                advisorReport = CityAdvisor.report(engine)
                 renderer.focusOn(engine.cols / 2, engine.rows / 2)
                 clampCamera()
                 speed = 1
@@ -1697,10 +2594,13 @@ class GameView(context: Context) : View(context) {
 
     companion object {
         private const val SAVE_KEY = "city_v1"
-        private const val TOOL_COLUMNS = 5
+        private const val SOUND_KEY = "sound_on"
+        private const val LONG_PRESS_MS = 400L
+        private const val TOOL_COLUMNS = 6
         private const val MODE_NONE = 0
         private const val MODE_PAINT = 1
         private const val MODE_PAN = 2
         private const val MODE_PINCH = 3
+        private const val MODE_INFO = 4
     }
 }

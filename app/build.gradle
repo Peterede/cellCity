@@ -3,29 +3,52 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Upload key for Google Play. Never commit this file; see README "Release builds".
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
 android {
-    namespace 'com.cellcity'
-    compileSdk 34
+    namespace 'com.edens.cellcity'
+    compileSdk 36
 
     defaultConfig {
-        applicationId "com.cellcity"
+        applicationId "com.edens.cellcity"
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         versionCode 1
-        versionName "1.0"
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
     }
 
     buildTypes {
         release {
+            // first upload stays unminified: the game uses no reflection, but R8
+            // would need a full on-device pass before shipping
             minifyEnabled false
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = '1.8'
+        jvmTarget = '17'
     }
     testOptions {
         unitTests.returnDefaultValues = true
@@ -33,6 +56,6 @@ android {
 }
 
 dependencies {
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.22'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.2.21'
     testImplementation 'junit:junit:4.13.2'
 }
