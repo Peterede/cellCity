@@ -378,7 +378,8 @@ class CityRenderer(private val density: Float) {
         hoverCol: Int,
         hoverRow: Int,
         hoverValid: Boolean,
-        time: Float
+        time: Float,
+        overlay: CoverageOverlay
     ) {
         val u = density * camera.zoom
         dashed.pathEffect = DashPathEffect(floatArrayOf(5f * u, 5f * u), 0f)
@@ -405,9 +406,57 @@ class CityRenderer(private val density: Float) {
         if (tool == Tool.POWERLINE) drawConduitOverlay(canvas, engine, u, power = true)
         if (tool == Tool.SUBWAY) drawSubwayOverlay(canvas, engine, u)
 
+        if (overlay != CoverageOverlay.NONE) drawCoverage(canvas, engine, overlay, u, time)
+
         drawCars(canvas, u)
         drawTrains(canvas, u)
         drawHover(canvas, engine, tool, hoverCol, hoverRow, hoverValid, u)
+    }
+
+    /**
+     * Data view: dims the city, then washes every tile in reach of the chosen
+     * service so the blind spots stand out, and pulses the stations themselves.
+     */
+    private fun drawCoverage(
+        canvas: Canvas,
+        engine: CityEngine,
+        overlay: CoverageOverlay,
+        u: Float,
+        time: Float
+    ) {
+        val hw = camera.tileW * 0.5f * camera.zoom
+        val hh = camera.tileH * 0.5f * camera.zoom
+        val station = overlay.station
+        for (row in 0 until engine.rows) {
+            for (col in 0 until engine.cols) {
+                val tile = engine.tile(col, row) ?: continue
+                val cx = camera.screenX(col.toFloat(), row.toFloat())
+                val cy = camera.screenY(col.toFloat(), row.toFloat())
+                if (cx < -hw || cx > viewW + hw) continue
+                if (cy < -hh * 2f || cy > viewH + hh * 2f) continue
+
+                diamondPath(cx, cy, hw, hh)
+                fill.color = withAlpha(INK, 58)
+                canvas.drawPath(path, fill)
+
+                if (tile.coveredBy(overlay)) {
+                    fill.color = withAlpha(overlay.color, 120)
+                    canvas.drawPath(path, fill)
+                    line.color = withAlpha(darken(overlay.color, 0.62f), 200)
+                    line.strokeWidth = max(1f, 1.2f * u)
+                    canvas.drawPath(path, line)
+                }
+
+                if (station != null && tile.zone == station) {
+                    val pulse = (sin(time * 2.4f + (col + row) * 0.7f) + 1f) * 0.5f
+                    val r = 0.92f + pulse * 0.16f
+                    diamondPath(cx, cy, hw * r, hh * r)
+                    line.color = withAlpha(PAPER, 210)
+                    line.strokeWidth = 2.2f * u
+                    canvas.drawPath(path, line)
+                }
+            }
+        }
     }
 
     private fun drawSea(canvas: Canvas, u: Float, time: Float) {

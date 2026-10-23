@@ -63,6 +63,11 @@ class GameView(context: Context) : View(context) {
     private val advisorRect = RectF()
     private var goalsOpen = false
 
+    // emergency-service coverage view: none, fire, police or health
+    private var coverageOverlay = CoverageOverlay.NONE
+    private val coverageModes = CoverageOverlay.values().filter { it != CoverageOverlay.NONE }
+    private val overlayRects = Array(CoverageOverlay.values().size) { RectF() }
+
     // advisor sheet and the tax stepper inside it
     private var advisorOpen = false
     private var advisorReport = CityAdvisor.report(engine)
@@ -387,6 +392,16 @@ class GameView(context: Context) : View(context) {
         undoRect.set(soundRect.left - gap - smallW, buttonTop, soundRect.left - gap, buttonBottom)
         advisorRect.set(undoRect.left - gap - smallW, buttonTop, undoRect.left - gap, buttonBottom)
 
+        // coverage chips float just under the banner slot, over the map
+        val chipW = 58f * density
+        val chipTop = hudPanelBottom + 36f * density
+        val chipBottom = chipTop + 23f * density
+        var chipLeft = margin
+        for (mode in coverageModes) {
+            overlayRects[mode.ordinal].set(chipLeft, chipTop, chipLeft + chipW, chipBottom)
+            chipLeft += chipW + gap
+        }
+
         if (advisorOpen) advisorTaxRects(advisorPanel(w))
     }
 
@@ -413,12 +428,13 @@ class GameView(context: Context) : View(context) {
         val valid = hoverCol >= 0 && hoverRow >= 0 &&
             (selected == Tool.BULLDOZE || selected == Tool.INFO ||
                 engine.canBuild(selected, hoverCol, hoverRow) == BuildResult.OK)
-        renderer.draw(canvas, engine, selected, hoverCol, hoverRow, valid, time)
+        renderer.draw(canvas, engine, selected, hoverCol, hoverRow, valid, time, coverageOverlay)
         drawEventFocus(canvas)
         if (selected == Tool.INFO) drawInspectorMarker(canvas)
 
         drawTopBar(canvas, w)
         drawBanner(canvas, w)
+        drawCoverageChips(canvas)
         drawToolbar(canvas, w, h)
         if (selected == Tool.INFO) drawInspectorCard(canvas, w, h)
         if (tooltipActive) drawTooltip(canvas, w, h)
@@ -1022,6 +1038,32 @@ class GameView(context: Context) : View(context) {
         if (lines.size > maxLines) return lines.take(maxLines)
         if (lines.isNotEmpty()) lines[lines.size - 1] = fitText(lines[lines.size - 1], paint, maxWidth)
         return lines
+    }
+
+    // ------------------------------------------------------------------ coverage
+
+    /** Three small chips that switch the map between the service coverage views. */
+    private fun drawCoverageChips(canvas: Canvas) {
+        textBold.textSize = 8.5f * density
+        textBold.textAlign = Paint.Align.LEFT
+        for (mode in coverageModes) {
+            val r = overlayRects[mode.ordinal]
+            val active = coverageOverlay == mode
+            fill.color = if (active) mode.color else paper
+            canvas.drawRoundRect(r, 7f * density, 7f * density, fill)
+            stroke.color = ink
+            stroke.strokeWidth = if (active) 2f * density else 1.5f * density
+            canvas.drawRoundRect(r, 7f * density, 7f * density, stroke)
+
+            fill.color = mode.color
+            canvas.drawCircle(r.left + 10f * density, r.centerY(), 3f * density, fill)
+            stroke.color = ink
+            stroke.strokeWidth = 1f * density
+            canvas.drawCircle(r.left + 10f * density, r.centerY(), 3f * density, stroke)
+
+            textBold.color = ink
+            canvas.drawText(mode.label, r.left + 17f * density, r.centerY() + 3f * density, textBold)
+        }
     }
 
     // ------------------------------------------------------------------ top bar
@@ -2241,6 +2283,15 @@ class GameView(context: Context) : View(context) {
                         return true
                     }
                     return true
+                }
+                for (mode in coverageModes) {
+                    if (overlayRects[mode.ordinal].contains(x, y)) {
+                        coverageOverlay = if (coverageOverlay == mode) CoverageOverlay.NONE else mode
+                        tooltipActive = false
+                        performClick()
+                        invalidate()
+                        return true
+                    }
                 }
                 // the event banner is a shortcut to whatever it is about
                 if (bannerTimer > 0f && bannerRect.contains(x, y)) {

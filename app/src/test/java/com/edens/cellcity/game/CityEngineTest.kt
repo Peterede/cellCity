@@ -163,6 +163,21 @@ class CityEngineTest {
     }
 
     @Test
+    fun coverageOverlayFlagsFollowTheirOwnService() {
+        val e = city(9)
+        assertEquals(BuildResult.OK, e.build(Tool.FIRE, 12, 12))
+
+        val near = e.tile(12, 14)!!
+        assertTrue("the fire view marks a covered tile", near.coveredBy(CoverageOverlay.FIRE))
+        assertEquals("police coverage is not borrowed", false, near.coveredBy(CoverageOverlay.POLICE))
+        assertEquals("health coverage is not borrowed", false, near.coveredBy(CoverageOverlay.HEALTH))
+        assertTrue("the normal view marks every tile", near.coveredBy(CoverageOverlay.NONE))
+
+        val far = e.tile(0, 0)!!
+        assertEquals("the fire view leaves distant tiles clear", false, far.coveredBy(CoverageOverlay.FIRE))
+    }
+
+    @Test
     fun fourLevelTwoLotsMergeIntoOneBigBuilding() {
         val e = city(13)
         assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 9))

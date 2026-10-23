@@ -109,6 +109,26 @@ enum class Tool(val zone: ZoneType, val label: String) {
         get() = zone.isService || zone.isMultiTile || this == INFO
 }
 
+/**
+ * A data view that shades the map by how far one emergency service reaches.
+ * NONE is the normal city view.
+ */
+enum class CoverageOverlay(val label: String, val color: Int) {
+    NONE("OFF", 0xFF9A9484.toInt()),
+    FIRE("FIRE", 0xFFE86A5B.toInt()),
+    POLICE("POLICE", 0xFF5AB6E8.toInt()),
+    HEALTH("HEALTH", 0xFF6FE0D0.toInt());
+
+    /** The station that provides this view's coverage, or null for the normal view. */
+    val station: ZoneType?
+        get() = when (this) {
+            FIRE -> ZoneType.FIRE
+            POLICE -> ZoneType.POLICE
+            HEALTH -> ZoneType.HOSPITAL
+            NONE -> null
+        }
+}
+
 /** One map cell. */
 class Tile {
     var terrain: Terrain = Terrain.GRASS
@@ -165,6 +185,14 @@ class Tile {
 
     val developed: Boolean
         get() = zone.isZone && level > 0
+
+    /** True when the active coverage overlay reaches this tile; always true for NONE. */
+    fun coveredBy(overlay: CoverageOverlay): Boolean = when (overlay) {
+        CoverageOverlay.FIRE -> fireCovered
+        CoverageOverlay.POLICE -> policeCovered
+        CoverageOverlay.HEALTH -> healthCovered
+        CoverageOverlay.NONE -> true
+    }
 
     fun clear() {
         zone = ZoneType.NONE
