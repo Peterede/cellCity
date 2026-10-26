@@ -82,12 +82,36 @@ object CityInspector {
                         )
                     )
                     facts.add(TileFact("Status", "vacant lot"))
+                    if (t.waterfront || t.reclaimed) {
+                        facts.add(TileFact("Waterfront", waterfrontBonus()))
+                    }
+                    facts.add(
+                        TileFact(
+                            "R / C / I demand",
+                            "${signed(engine.demandR)} ${signed(engine.demandC)} " +
+                                "${signed(engine.demandI)}"
+                        )
+                    )
                     broken = !t.roadAccess || !t.powered || !t.watered
                     advice = when {
                         !t.roadAccess -> "Lay a road beside this lot so people can reach it."
                         !t.powered -> "No power reaches it - place a PLANT or run a cable here."
                         !t.watered -> "No water reaches it - place a WATER tower or pipe a main."
-                        demand <= 0.04f -> "Services are ready but demand is flat - zone jobs or parks."
+                        demand <= 0.04f -> when (t.zone) {
+                            ZoneType.RESIDENTIAL ->
+                                "Residential demand is flat - jobs and services need to catch " +
+                                    "up before more homes fill."
+
+                            ZoneType.COMMERCIAL ->
+                                "There are already more shops than customers - grow the " +
+                                    "population before zoning more COM."
+
+                            ZoneType.INDUSTRIAL ->
+                                "Industry is ahead of the workforce - add homes and jobs " +
+                                    "before zoning more IND."
+
+                            else -> "Demand is flat - improve the city before zoning more."
+                        }
                         else -> "Ready to grow - a building appears over the next few days."
                     }
                 } else {
@@ -96,6 +120,9 @@ object CityInspector {
                     val fill = if (cap == 0) 0f else inside.toFloat() / cap
                     facts.add(TileFact("Level", "L${t.level} of ${Config.MAX_LEVEL}"))
                     facts.add(TileFact("Inside", "$inside of $cap"))
+                    if (t.waterfront || t.reclaimed) {
+                        facts.add(TileFact("Waterfront", waterfrontBonus()))
+                    }
                     facts.add(TileFact("Income", perDay(engine.incomePerTick(t))))
 
                     val cover = coverage(engine, col, row)
@@ -260,13 +287,16 @@ object CityInspector {
                     )
                 )
                 facts.add(TileFact("Upkeep", perDay(-engine.incomePerTick(t))))
-                if (onWater) facts.add(TileFact("Bridge", "over water"))
+                if (onWater) {
+                    facts.add(TileFact("Bridge", "over water"))
+                    facts.add(TileFact("Fill cost", dollars(engine.costOf(Tool.RECLAIM, col, row))))
+                }
                 if (t.pipe) facts.add(TileFact("Water main", if (t.watered) "live" else "dry"))
                 if (t.powerline) facts.add(TileFact("Cable", if (t.powered) "live" else "dead"))
                 broken = joins == 0
                 advice = when {
                     joins == 0 -> "A stub with no neighbours - connect it to the street grid."
-                    onWater -> "A bridge: cars, power and water mains all cross here."
+                    onWater -> "A bridge: cars, power and water mains cross here. FILL makes it dry land."
                     else -> "Roads carry power and give every lot beside them access."
                 }
             }
@@ -343,7 +373,15 @@ object CityInspector {
 
             onWater -> {
                 facts.add(TileFact("Terrain", "open water"))
-                advice = "Open water: only ROAD/HIGHWAY bridges and SUBWAY tunnels cross it."
+                val shore = around.any { it.terrain != Terrain.WATER }
+                if (shore) {
+                    facts.add(TileFact("Fill cost", dollars(engine.costOf(Tool.RECLAIM, col, row))))
+                }
+                advice = if (shore) {
+                    "Open water: bridge it, tunnel under it, or FILL it into land you can zone."
+                } else {
+                    "Open water: FILL works from the shore - fill the edge first, then outward."
+                }
             }
 
             else -> {
@@ -360,6 +398,9 @@ object CityInspector {
                         if (t.terrain == Terrain.FOREST) "forest (cleared when built)" else "grass"
                     )
                 )
+                if (t.waterfront || t.reclaimed) {
+                    facts.add(TileFact("Waterfront", waterfrontBonus()))
+                }
                 if (t.subway) facts.add(TileFact("Subway", if (t.subwayConnected) "tunnel" else "stub"))
                 if (t.pipe) facts.add(TileFact("Water main", if (t.watered) "live" else "dry"))
                 if (t.powerline) facts.add(TileFact("Cable", if (t.powered) "live" else "dead"))
@@ -451,6 +492,12 @@ object CityInspector {
             else -> "$percent%"
         }
     }
+
+    private fun dollars(value: Int): String = "\$" + value
+
+    /** The desirability bump a waterside lot gets, as a percent of capacity. */
+    private fun waterfrontBonus(): String =
+        "+" + ((Config.WATERFRONT_CAPACITY - 1f) * 100f).toInt() + "% capacity"
 
     private fun perDay(value: Float): String {
         val cents = Math.round(value * 100.0).toInt()

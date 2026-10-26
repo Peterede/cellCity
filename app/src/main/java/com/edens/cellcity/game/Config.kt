@@ -17,6 +17,16 @@ object Config {
     // --- build costs -------------------------------------------------------
     const val COST_ROAD = 15
     const val COST_BRIDGE = 90
+    /**
+     * Dredging a shallow water cell into buildable land. The base price buys
+     * the fill; every water cell still touching the plot adds a surcharge, so
+     * the shoreline is cheap and the middle of the river is not.
+     */
+    const val COST_RECLAIM = 90
+    const val COST_RECLAIM_DEEP = 30
+    /** Cutting a canal into dry land; every land side still beside it adds a surcharge. */
+    const val COST_CANAL = 100
+    const val COST_CANAL_LAND = 30
     /** Four-lane road: acts as a road, but moves traffic faster and pulls in trade. */
     const val COST_HIGHWAY = 120
     const val COST_HIGHWAY_BRIDGE = 300
@@ -100,6 +110,8 @@ object Config {
     const val MERGE_LEVEL = 2
     /** Merged lots get roomier floors than four separate buildings. */
     const val MERGE_CAPACITY_BONUS = 1.35f
+    /** Lots beside open water - or standing on filled land - hold this much more. */
+    const val WATERFRONT_CAPACITY = 1.12f
 
     // --- progression -------------------------------------------------------
     /** Below this many residents a city is too small to judge as "stable". */
@@ -113,6 +125,8 @@ object Config {
     const val MILESTONE_POP_METROPOLIS = 5000
     const val MILESTONE_STEADY_DAYS = 30
     const val MILESTONE_STABLE_CYCLE_DAYS = 100
+    /** Months kept in the city record (graphs show the most recent ones). */
+    const val HISTORY_MONTHS = 60
 
     // --- disasters ---------------------------------------------------------
     /** Chance per day that a building with no fire cover catches fire. */
@@ -127,6 +141,27 @@ object Config {
     const val MAX_ACTIVE_FIRES = 3
     /** Buildings hit by crime before the city is warned. */
     const val CRIME_WAVE = 5
+
+    // --- debt and stakes ---------------------------------------------------
+    /** Daily interest charged on a negative treasury. */
+    const val DEBT_DAILY_RATE = 0.0015f
+    /** Consecutive days in the red before the city is declared bankrupt. */
+    const val BANKRUPTCY_DAYS = 60
+    /** Emergency loan cash the mayor can accept once bankrupt... */
+    const val BAILOUT_CASH = 6_000
+    /** ...and what it really costs, repaid a little each day. */
+    const val BAILOUT_DEBT = 9_000
+    const val LOAN_DAILY_PAYMENT = 40
+
+    // --- decisions and contracts -------------------------------------------
+    /** Days before the first decision card can arrive. */
+    const val DECISION_FIRST_DAYS = 30
+    const val DECISION_GAP_MIN = 25
+    const val DECISION_GAP_MAX = 45
+    /** A city has to be this big before the region bothers asking anything. */
+    const val DECISION_MIN_POPULATION = 30
+    const val CONTRACT_DAYS = 45
+    const val CONTRACT_COOLDOWN_DAYS = 10
 
     // --- taxes -------------------------------------------------------------
     /** The tax rate the city starts with, in percent of a citizen's income. */

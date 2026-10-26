@@ -92,6 +92,10 @@ enum class Tool(val zone: ZoneType, val label: String) {
     POLICE(ZoneType.POLICE, "POLICE"),
     FIRE(ZoneType.FIRE, "FIRE"),
     HOSPITAL(ZoneType.HOSPITAL, "HOSP"),
+    /** Raises dry land out of a water cell that touches the shore. */
+    RECLAIM(ZoneType.NONE, "FILL"),
+    /** Cuts a water channel into empty land that touches existing water. */
+    CANAL(ZoneType.NONE, "CANAL"),
     BULLDOZE(ZoneType.NONE, "DOZE"),
     PAN(ZoneType.NONE, "PAN"),
     /** Read-only tool: tapping a cell explains what it needs. */
@@ -178,6 +182,15 @@ class Tile {
     /** Computed each tick: a hospital reaches this tile. */
     var healthCovered: Boolean = false
 
+    /**
+     * Dry land lifted out of the water by the FILL tool. It stays land for good
+     * and, like a natural waterfront, holds a little more than ordinary ground.
+     */
+    var reclaimed: Boolean = false
+
+    /** Computed each tick: an orthogonal neighbour is open water. */
+    var waterfront: Boolean = false
+
     /** True when this tile is one quarter of a 2x2 block (merged lots or an airport). */
     var merged: Boolean = false
     var originCol: Int = -1
@@ -223,6 +236,11 @@ enum class BuildResult(val message: String) {
     NO_FUNDS("Not enough funds"),
     OCCUPIED("Tile is already in use"),
     WATER("Can't build on water"),
+    NOT_WATER("That cell is already dry land"),
+    NO_SHORE("Fill has to touch the shore or filled land"),
+    ALREADY_WATER("That cell is already water"),
+    NO_WATER_EDGE("Dig from the water's edge outward"),
+    LAYERED("Clear the pipes and cables here first"),
     NO_ROAD("Needs a road beside it"),
     NO_RAIL("Needs rail beside it"),
     NO_SUBWAY("Needs a subway line under or beside it"),
@@ -268,6 +286,8 @@ enum class Milestone(
             Tool.WATER,
             Tool.PIPE,
             Tool.POWERLINE,
+            Tool.RECLAIM,
+            Tool.CANAL,
             Tool.BULLDOZE,
             Tool.PAN,
             Tool.INFO
@@ -316,4 +336,98 @@ sealed class CityEvent {
     ) : CityEvent()
 
     data class Notice(val text: String) : CityEvent()
+    data class DecisionOffered(val decision: PendingDecision) : CityEvent()
+    data class ContractComplete(val contract: Contract) : CityEvent()
+    data class ContractExpired(val contract: Contract) : CityEvent()
+    data class Bankrupt(val debt: Int) : CityEvent()
+}
+
+/**
+ * What a FILL gesture would do: the cells it would raise, in fill order (outward
+ * from the shore), the total price, and whether it can run at all.
+ */
+data class FillPlan(
+    val cells: List<Int>,
+    val cost: Int,
+    val result: BuildResult
+) {
+    val count: Int get() = cells.size
+}
+
+/**
+ * One month's closing snapshot, kept so the player can see the city's story
+ * over time: the report card draws these as graphs and a monthly ledger.
+ */
+data class CityRecord(
+    val month: Int,
+    val year: Int,
+    val population: Int,
+    val jobs: Int,
+    val funds: Int,
+    /** 0..100. */
+    val happiness: Int,
+    /** 0..100. */
+    val pollution: Int,
+    val income: Int,
+    val expenses: Int
+) {
+    val net: Int get() = income - expenses
+}
+
+/** How hard the city is to run; chosen when it is founded. */
+enum class Difficulty(
+    val label: String,
+    val blurb: String,
+    val startFunds: Int,
+    val incidentScale: Float,
+    val upkeepScale: Float
+) {
+    EASY("Easy", "Generous funds, fewer fires", 20_000, 0.7f, 0.9f),
+    NORMAL("Normal", "The standard challenge", Config.START_FUNDS, 1f, 1f),
+    HARD("Hard", "Lean budget, rougher streets", 10_000, 1.4f, 1.15f)
+}
+
+/** A situation that needs a mayoral decision; resolved in the card sheet. */
+enum class DecisionKind {
+    GRANT,
+    FACTORY_PERMIT,
+    FESTIVAL,
+    HEAT_WAVE,
+    TAX_REVOLT,
+    GRID_FAILURE
+}
+
+data class DecisionOption(val label: String, val detail: String)
+
+/** A card waiting for the mayor to pick one of its options. */
+data class PendingDecision(
+    val kind: DecisionKind,
+    val title: String,
+    val body: String,
+    val options: List<DecisionOption>
+)
+
+/** A side objective with a deadline, offered by the region. */
+enum class ContractKind(val title: String) {
+    POPULATION("Population drive"),
+    TREASURY("Fill the treasury"),
+    FIRE_COVER("Fire safety audit"),
+    POLICE_COVER("Community policing"),
+    HAPPINESS("Keep citizens happy"),
+    PARKS("Green city")
+}
+
+data class Contract(
+    val kind: ContractKind,
+    val target: Int,
+    val deadlineDay: Int,
+    val reward: Int,
+    val offeredDay: Int
+)
+
+/** The shape of the land a new city is founded on. */
+enum class MapStyle(val label: String, val blurb: String) {
+    RIVERLANDS("Riverlands", "River to the west, lake in the south-east"),
+    BAYSIDE("Bayside", "A wide bay in the north-east, open land south-west"),
+    TWIN_RIVERS("Twin Rivers", "Two channels cut the map into quarters")
 }

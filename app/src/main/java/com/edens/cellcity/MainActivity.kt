@@ -1,10 +1,13 @@
 package com.edens.cellcity
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
+import com.edens.cellcity.game.CityNotifier
 import com.edens.cellcity.game.GameView
 
 class MainActivity : Activity() {
@@ -34,6 +37,14 @@ class MainActivity : Activity() {
         gameView = GameView(this)
         setContentView(gameView)
         window.decorView.setOnSystemUiVisibilityChangeListener { applyImmersiveFlags() }
+
+        CityNotifier.ensureChannel(this)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
+        }
     }
 
     @Suppress("DEPRECATION")

@@ -1,6 +1,7 @@
 package com.edens.cellcity.game
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -69,6 +70,273 @@ class CityEngineTest {
         assertEquals(BuildResult.OK, e.build(Tool.BULLDOZE, wc, wr))
         assertEquals(ZoneType.NONE, e.tile(wc, wr)!!.zone)
         assertEquals(Terrain.WATER, e.tile(wc, wr)!!.terrain)
+    }
+
+    @Test
+    fun fillingShoreWaterMakesBuildableLand() {
+        val e = city(21)
+        val (c, r) = findShoreWater(e)
+        val before = e.funds
+        val sides = waterSides(e, c, r)
+        val cost = e.costOf(Tool.RECLAIM, c, r)
+        assertEquals(
+            "the price is the base plus every water side",
+            Config.COST_RECLAIM + sides * Config.COST_RECLAIM_DEEP,
+            cost
+        )
+
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
+        assertEquals(Terrain.GRASS, e.tile(c, r)!!.terrain)
+        assertEquals(before - cost, e.funds)
+
+        // the raised cell is ordinary ground: it can be zoned and built on
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, c, r))
+        assertEquals(ZoneType.RESIDENTIAL, e.tile(c, r)!!.zone)
+    }
+
+    @Test
+    fun fillingIsTurnedDownOnDryLandAndInOpenWater() {
+        val e = city(21)
+        assertEquals(BuildResult.NOT_WATER, e.build(Tool.RECLAIM, 12, 12))
+
+        val open = findOpenWater(e)
+        assertNotNull("the lake has water away from any shore", open)
+        assertEquals(BuildResult.NO_SHORE, e.build(Tool.RECLAIM, open!!.first, open.second))
+    }
+
+    @Test
+    fun fillHasToGrowOutFromTheShore() {
+        val e = city(21)
+        val pair = findBankAndOpenWater(e)
+        assertNotNull("the river has open water behind the bank", pair)
+        val shore = pair!!.first
+        val inland = pair.second
+
+        assertEquals(BuildResult.NO_SHORE, e.build(Tool.RECLAIM, inland.first, inland.second))
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, shore.first, shore.second))
+        assertEquals(
+            "once the bank is filled the next cell touches land",
+            BuildResult.OK,
+            e.build(Tool.RECLAIM, inland.first, inland.second)
+        )
+        assertEquals(Terrain.GRASS, e.tile(inland.first, inland.second)!!.terrain)
+    }
+
+    @Test
+    fun deepWaterCostsMoreThanTheBank() {
+        val e = city(21)
+        val bank = findShoreWater(e)
+        val deep = findWaterWithSides(e, 4)
+        assertNotNull("the lake has open middle water", deep)
+        val bankCost = e.costOf(Tool.RECLAIM, bank.first, bank.second)
+        val deepCost = e.costOf(Tool.RECLAIM, deep!!.first, deep.second)
+        assertTrue("filling the middle costs more than the bank", deepCost > bankCost)
+    }
+
+    @Test
+    fun fillingKeepsWhateverWasUnderTheWater() {
+        val e = city(21)
+        val (c, r) = findShoreWater(e)
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, c, r))
+        assertEquals(BuildResult.OK, e.build(Tool.PIPE, c, r))
+        assertEquals(Terrain.WATER, e.tile(c, r)!!.terrain)
+
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
+        assertEquals(Terrain.GRASS, e.tile(c, r)!!.terrain)
+        assertEquals("the bridge becomes a road on dry land", ZoneType.ROAD, e.tile(c, r)!!.zone)
+        assertTrue("the main under it survives", e.tile(c, r)!!.pipe)
+    }
+
+    @Test
+    fun fillUndoesAndSavesAsLand() {
+        val e = city(21)
+        val (c, r) = findShoreWater(e)
+        val before = e.funds
+        e.beginAction()
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
+        assertTrue(e.endAction())
+        assertEquals("build", e.undo())
+        assertEquals(Terrain.WATER, e.tile(c, r)!!.terrain)
+        assertEquals(before, e.funds)
+
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals(Terrain.GRASS, loaded!!.tile(c, r)!!.terrain)
+        assertEquals(e.funds, loaded.funds)
+        assertEquals(
+            "saved land is buildable again",
+            BuildResult.OK,
+            loaded.build(Tool.RESIDENTIAL, c, r)
+        )
+    }
+
+    @Test
+    fun fillingASelectedPatchQuotesFirstThenBuilds() {
+        val e = city(21)
+        val pair = findBankAndOpenWater(e)
+        assertNotNull(pair)
+        val bank = pair!!.first
+        val inlet = pair.second
+        val before = e.funds
+
+        val quote = e.planFill(bank.first, bank.second, inlet.first, inlet.second)
+        assertEquals(BuildResult.OK, quote.result)
+        assertEquals("both cells are in the patch", 2, quote.count)
+        assertEquals("quoting spends nothing", before, e.funds)
+        assertEquals(Terrain.WATER, e.tile(inlet.first, inlet.second)!!.terrain)
+
+        val done = e.fillArea(bank.first, bank.second, inlet.first, inlet.second)
+        assertEquals("the bill matches the quote", quote.cost, done.cost)
+        assertEquals(before - quote.cost, e.funds)
+        for (index in done.cells) {
+            val t = e.tile(index % e.cols, index / e.cols)!!
+            assertEquals(Terrain.GRASS, t.terrain)
+            assertTrue("filled ground is marked as reclaimed", t.reclaimed)
+        }
+    }
+
+    @Test
+    fun fillingAPatchIsOneUndoStep() {
+        val e = city(21)
+        val pair = findBankAndOpenWater(e)!!
+        val bank = pair.first
+        val inlet = pair.second
+        val before = e.funds
+
+        e.beginAction()
+        assertEquals(
+            BuildResult.OK,
+            e.fillArea(bank.first, bank.second, inlet.first, inlet.second).result
+        )
+        assertTrue(e.endAction())
+        assertEquals("build", e.undo())
+        assertEquals(Terrain.WATER, e.tile(bank.first, bank.second)!!.terrain)
+        assertEquals(Terrain.WATER, e.tile(inlet.first, inlet.second)!!.terrain)
+        assertFalse(e.tile(bank.first, bank.second)!!.reclaimed)
+        assertEquals(before, e.funds)
+    }
+
+    @Test
+    fun aPatchNeedsWaterItCanReach() {
+        val e = city(21)
+        val (dc, dr) = findDryLand(e)!!
+        assertEquals(BuildResult.NOT_WATER, e.planFill(dc, dr, dc, dr).result)
+
+        val open = findOpenWater(e)!!
+        assertEquals(
+            "water with no shore to start from cannot be filled",
+            BuildResult.NO_SHORE,
+            e.planFill(open.first, open.second, open.first, open.second).result
+        )
+    }
+
+    @Test
+    fun canalsCutWaterInFromTheEdge() {
+        val e = city(21)
+        val (c, r) = findBankland(e)!!
+        val before = e.funds
+        val sides = inBoundsLandSides(e, c, r)
+        val cost = e.costOf(Tool.CANAL, c, r)
+        assertEquals(
+            "the price is the base plus every land side",
+            Config.COST_CANAL + sides * Config.COST_CANAL_LAND,
+            cost
+        )
+
+        assertEquals(BuildResult.OK, e.build(Tool.CANAL, c, r))
+        assertEquals(Terrain.WATER, e.tile(c, r)!!.terrain)
+        assertEquals(before - cost, e.funds)
+        assertEquals(
+            "a channel cannot be zoned",
+            BuildResult.WATER,
+            e.build(Tool.RESIDENTIAL, c, r)
+        )
+    }
+
+    @Test
+    fun canalsNeedTheWaterEdgeAndEmptyGround() {
+        val e = city(21)
+        val (wc, wr) = findShoreWater(e)
+        assertEquals(BuildResult.ALREADY_WATER, e.build(Tool.CANAL, wc, wr))
+
+        val (ic, ir) = findDryLand(e)!!
+        assertEquals(BuildResult.NO_WATER_EDGE, e.build(Tool.CANAL, ic, ir))
+
+        // a road in the way stops the dig
+        var road: Pair<Int, Int>? = null
+        var piped: Pair<Int, Int>? = null
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                val t = e.tile(c, r)!!
+                if (t.terrain == Terrain.WATER || !t.waterfront) continue
+                if (t.zone != ZoneType.NONE) continue
+                if (road == null) road = c to r else if (piped == null) piped = c to r
+            }
+        }
+        assertNotNull("the map has two open bank cells", piped)
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, road!!.first, road.second))
+        assertEquals(
+            BuildResult.OCCUPIED,
+            e.build(Tool.CANAL, road.first, road.second)
+        )
+
+        assertEquals(BuildResult.OK, e.build(Tool.PIPE, piped!!.first, piped.second))
+        assertEquals(
+            "a buried main blocks the dig rather than being destroyed",
+            BuildResult.LAYERED,
+            e.build(Tool.CANAL, piped.first, piped.second)
+        )
+    }
+
+    @Test
+    fun waterfrontAndFilledLotsHoldMore() {
+        val e = city(7)
+        val (bc, br) = findBankland(e)!!
+        val (ic, ir) = findDryLand(e)!!
+        val waterside = e.tile(bc, br)!!
+        val inland = e.tile(ic, ir)!!
+        assertTrue("the bank cell knows it is waterfront", waterside.waterfront)
+        assertFalse("inland ground does not", inland.waterfront)
+
+        waterside.zone = ZoneType.RESIDENTIAL
+        waterside.level = 1
+        inland.zone = ZoneType.RESIDENTIAL
+        inland.level = 1
+        val base = e.capacityOf(ZoneType.RESIDENTIAL, 1)
+        assertEquals(
+            (base * Config.WATERFRONT_CAPACITY).roundToInt(),
+            e.capacityForTile(waterside)
+        )
+        assertEquals(base, e.capacityForTile(inland))
+
+        inland.reclaimed = true
+        assertEquals(
+            "filled ground gets the same lift",
+            (base * Config.WATERFRONT_CAPACITY).roundToInt(),
+            e.capacityForTile(inland)
+        )
+    }
+
+    @Test
+    fun reclaimedGroundSurvivesASaveAndOlderSavesStayPlain() {
+        val e = city(21)
+        val (c, r) = findShoreWater(e)
+        assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
+        assertTrue(e.tile(c, r)!!.reclaimed)
+        assertTrue(e.save().startsWith("CC11|"))
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals(Terrain.GRASS, loaded!!.tile(c, r)!!.terrain)
+        assertTrue("filled land is still filled land", loaded.tile(c, r)!!.reclaimed)
+
+        val older = e.save().split('|').toMutableList()
+        older[0] = "CC10"
+        val old = CityEngine.load(older.joinToString("|"))
+        assertNotNull("the previous save version still loads", old)
+        assertEquals(Terrain.GRASS, old!!.tile(c, r)!!.terrain)
+        assertFalse("older saves have no reclaimed ground", old.tile(c, r)!!.reclaimed)
     }
 
     @Test
@@ -411,6 +679,294 @@ class CityEngineTest {
     }
 
     @Test
+    fun eachClosedMonthIsAddedToTheRecord() {
+        val e = city()
+        assertEquals("opening snapshot", 1, e.history.size)
+        repeat(Config.DAYS_PER_MONTH * 2) { e.tick() }
+        assertEquals(3, e.history.size)
+        val first = e.history[1]
+        assertEquals(1, first.month)
+        assertEquals(Config.START_YEAR, first.year)
+        assertEquals(first.income - first.expenses, first.net)
+        assertTrue(first.income >= 0)
+        assertTrue(first.expenses >= 0)
+        assertEquals(2, e.history[2].month)
+    }
+
+    @Test
+    fun difficultySetsTheOpeningTreasuryAndSurvivesASave() {
+        val easy = CityEngine(seed = 3, enforceUnlocks = false, difficultyLevel = Difficulty.EASY)
+        val normal = CityEngine(seed = 3, enforceUnlocks = false)
+        val hard = CityEngine(seed = 3, enforceUnlocks = false, difficultyLevel = Difficulty.HARD)
+        assertEquals(20_000, easy.funds)
+        assertEquals(15_000, normal.funds)
+        assertEquals(10_000, hard.funds)
+        assertEquals(Difficulty.HARD, hard.difficulty)
+
+        val loaded = CityEngine.load(hard.save())
+        assertNotNull(loaded)
+        assertEquals(Difficulty.HARD, loaded!!.difficulty)
+        assertEquals(hard.funds, loaded.funds)
+    }
+
+    @Test
+    fun heavyDebtEndsInBankruptcyAndTheLoanCostsMore() {
+        val e = CityEngine(8, 8, seed = 4L, enforceUnlocks = false)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 4, 4))
+        assertTrue(e.expensesPerDay > 0f)
+        var days = 0
+        while (!e.bankrupt && days < 40_000) {
+            e.tick()
+            days++
+        }
+        assertTrue("the treasury eventually runs dry", e.bankrupt)
+        assertTrue(e.debtDays >= Config.BANKRUPTCY_DAYS)
+        assertTrue(e.funds < 0)
+
+        val cash = e.funds
+        assertTrue(e.acceptBailout())
+        assertFalse(e.bankrupt)
+        assertTrue(e.funds > cash)
+        assertEquals(Config.BAILOUT_DEBT, e.loanBalance)
+        assertEquals(1, e.bailouts)
+        assertFalse("a bailout cannot be taken twice", e.acceptBailout())
+    }
+
+    @Test
+    fun aDecisionCardWaitsAndItsChoiceChangesTheCity() {
+        val e = city(17)
+        buildBasicTown(e)
+        var guard = 0
+        while (e.pendingDecision == null && guard < 400) {
+            e.tick()
+            guard++
+        }
+        assertNotNull("a card arrives once the town is big enough", e.pendingDecision)
+        assertTrue(e.population >= Config.DECISION_MIN_POPULATION)
+
+        val funds = e.funds
+        val happy = e.happiness
+        val tax = e.taxRate
+        assertNotNull(e.resolveDecision(0))
+        assertNull(e.pendingDecision)
+        assertTrue(
+            "the choice changed something",
+            e.funds != funds || e.happiness != happy || e.taxRate != tax
+        )
+        assertNull("a card resolves only once", e.resolveDecision(0))
+    }
+
+    @Test
+    fun contractsNameATargetAndCountDown() {
+        val e = city(23)
+        val c = e.contract
+        assertNotNull("a contract is offered with the city", c)
+        assertTrue(c!!.target > 0)
+        assertTrue(e.contractDaysLeft(c) in 1..Config.CONTRACT_DAYS)
+
+        val custom = Contract(ContractKind.POPULATION, 10, e.totalDays + 5, 100, e.totalDays)
+        assertEquals(e.population, e.contractProgress(custom))
+        assertEquals(5, e.contractDaysLeft(custom))
+    }
+
+    @Test
+    fun scoreAndMedalsFollowTheCity() {
+        val e = city(41)
+        val before = e.cityScore
+        val (c, r) = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }!!
+        assertEquals(BuildResult.OK, e.build(Tool.PARK, c, r))
+        assertEquals("a park adds to the score", before + 40, e.cityScore)
+        assertEquals("No medal", e.medalName)
+        assertEquals(0, e.medalCount)
+    }
+
+    @Test
+    fun achievementsAreReadFromTheCity() {
+        val e = city(43)
+        assertEquals(setOf(Achievement.FOUNDED), AchievementJudge.earned(e))
+        repeat(5) {
+            val spot = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }
+            assertNotNull(spot)
+            assertEquals(BuildResult.OK, e.build(Tool.PARK, spot!!.first, spot.second))
+        }
+        assertTrue(
+            "five parks earn the Green Belt",
+            Achievement.GREEN in AchievementJudge.earned(e)
+        )
+        assertTrue(
+            "the founder award is always there",
+            Achievement.FOUNDED in AchievementJudge.earned(e)
+        )
+    }
+
+    @Test
+    fun stakesAndContractsSurviveASave() {
+        val e = CityEngine(seed = 47, enforceUnlocks = false, mapStyleLevel = MapStyle.BAYSIDE)
+        e.setTaxRate(13)
+        repeat(Config.DAYS_PER_MONTH) { e.tick() }
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals(e.difficulty, loaded!!.difficulty)
+        assertEquals(e.contract, loaded.contract)
+        assertEquals(e.decisionCooldown, loaded.decisionCooldown)
+        assertEquals(e.debtDays, loaded.debtDays)
+        assertEquals(e.bankrupt, loaded.bankrupt)
+        assertEquals(e.bailouts, loaded.bailouts)
+        assertEquals(e.loanBalance, loaded.loanBalance)
+        assertEquals(e.pollutionOffset, loaded.pollutionOffset, 0.001f)
+        assertEquals(e.totalDays, loaded.totalDays)
+        assertEquals(MapStyle.BAYSIDE, loaded.mapStyle)
+    }
+
+    @Test
+    fun anOpenDecisionSurvivesSaveAndLoad() {
+        val e = city(17)
+        buildBasicTown(e)
+        var guard = 0
+        while (e.pendingDecision == null && guard < 400) {
+            e.tick()
+            guard++
+        }
+        val card = e.pendingDecision
+        assertNotNull("a card was waiting", card)
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertNotNull("the card survives the save", loaded!!.pendingDecision)
+        assertEquals(card!!.kind, loaded.pendingDecision!!.kind)
+        assertNotNull(loaded.resolveDecision(0))
+        assertNull(loaded.pendingDecision)
+    }
+
+    @Test
+    fun cc9SavesStillLoadWithTheClassicMap() {
+        val e = city(51)
+        repeat(Config.DAYS_PER_MONTH) { e.tick() }
+        val parts = e.save().split('|')
+        assertEquals(24, parts.size)
+        val cc9Parts = parts.subList(0, 22).toMutableList()
+        cc9Parts[0] = "CC9"
+
+        val loaded = CityEngine.load(cc9Parts.joinToString("|"))
+        assertNotNull("the previous save version still loads", loaded)
+        assertEquals(MapStyle.RIVERLANDS, loaded!!.mapStyle)
+        assertNull(loaded.pendingDecision)
+        assertEquals(e.funds, loaded.funds)
+    }
+
+    @Test
+    fun otherMapsChangeTheLandButKeepADryStart() {
+        val bay = CityEngine(seed = 9, enforceUnlocks = false, mapStyleLevel = MapStyle.BAYSIDE)
+        val twin = CityEngine(
+            seed = 9,
+            enforceUnlocks = false,
+            mapStyleLevel = MapStyle.TWIN_RIVERS
+        )
+        assertEquals(MapStyle.BAYSIDE, bay.mapStyle)
+        assertEquals(Terrain.GRASS, bay.tile(12, 12)!!.terrain)
+        assertEquals(Terrain.GRASS, twin.tile(12, 12)!!.terrain)
+
+        var bayWater = 0
+        for (r in 0 until 8) {
+            for (c in 16 until 24) {
+                if (bay.tile(c, r)!!.terrain == Terrain.WATER) bayWater++
+            }
+        }
+        assertTrue("the bay fills the north-east", bayWater > 20)
+
+        var westWater = 0
+        var southWater = 0
+        for (r in 0 until 24) {
+            for (c in 0 until 9) {
+                if (twin.tile(c, r)!!.terrain == Terrain.WATER) westWater++
+            }
+        }
+        for (r in 16 until 24) {
+            for (c in 0 until 24) {
+                if (twin.tile(c, r)!!.terrain == Terrain.WATER) southWater++
+            }
+        }
+        assertTrue("a channel runs down the west", westWater > 20)
+        assertTrue("a channel runs across the south", southWater > 20)
+    }
+
+    @Test
+    fun vacantLotsAreCountedByZone() {
+        val e = city(59)
+        val res = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }!!
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, res.first, res.second))
+        val com = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }!!
+        assertEquals(BuildResult.OK, e.build(Tool.COMMERCIAL, com.first, com.second))
+        val ind = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }!!
+        assertEquals(BuildResult.OK, e.build(Tool.INDUSTRIAL, ind.first, ind.second))
+
+        assertEquals(1, e.vacantCount(ZoneType.RESIDENTIAL))
+        assertEquals(1, e.vacantCount(ZoneType.COMMERCIAL))
+        assertEquals(1, e.vacantCount(ZoneType.INDUSTRIAL))
+        assertEquals(3, e.vacantZoneCount)
+    }
+
+    @Test
+    fun advisorNamesTheEmptyZones() {
+        val e = city(61)
+        val tools = arrayOf(Tool.RESIDENTIAL, Tool.COMMERCIAL, Tool.INDUSTRIAL)
+        for (i in 0 until 12) {
+            val spot = findTile(e) { it.zone == ZoneType.NONE && it.terrain != Terrain.WATER }!!
+            assertEquals(BuildResult.OK, e.build(tools[i % 3], spot.first, spot.second))
+        }
+
+        val issue = CityAdvisor.report(e).issues.firstOrNull { it.title == "Zoned lots sit empty" }
+        assertNotNull("empty lots are called out", issue)
+        assertTrue("the advice breaks the count down: ${issue!!.detail}", issue.detail.contains("4 RES"))
+        assertTrue(issue.detail.contains("4 COM"))
+        assertTrue(issue.detail.contains("4 IND"))
+    }
+
+    @Test
+    fun cityClockCountsWholeHoursUpToAWeek() {
+        val now = 1_000_000_000_000L
+        assertEquals(0, CityClock.daysAway(0L, now))
+        assertEquals(0, CityClock.daysAway(now + 1000L, now))
+        assertEquals(0, CityClock.daysAway(now, now))
+        assertEquals(1, CityClock.daysAway(now - 3_600_000L, now))
+        assertEquals(7, CityClock.daysAway(now - 100L * 3_600_000L, now))
+    }
+
+    @Test
+    fun theRecordSurvivesSaveAndLoad() {
+        val e = city(31)
+        assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.WATER, 12, 14))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        repeat(Config.DAYS_PER_MONTH * 3) { e.tick() }
+        assertTrue(e.history.size >= 3)
+        assertTrue(e.save().startsWith("CC11|"))
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals(e.history, loaded!!.history)
+        assertEquals(e.funds, loaded.funds)
+    }
+
+    @Test
+    fun olderSavesStillLoadWithoutARecord() {
+        // A CC7 save is this save with the record part taken back out.
+        val e = city(5)
+        repeat(Config.DAYS_PER_MONTH) { e.tick() }
+        val parts = e.save().split('|')
+        val cc7 = (listOf("CC7") + parts.subList(1, 11) + parts.subList(12, 13))
+            .joinToString("|")
+
+        val loaded = CityEngine.load(cc7)
+        assertNotNull(loaded)
+        assertEquals(e.funds, loaded!!.funds)
+        assertEquals(e.month, loaded.month)
+        assertEquals(ZoneType.NONE, loaded.tile(3, 3)!!.zone)
+    }
+
+    @Test
     fun saveAndLoadPreserveTheCity() {
         val e = city(31)
         assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
@@ -662,7 +1218,7 @@ class CityEngineTest {
 
         // rewrite the CC6 save the way the previous version stored it: pipes as a zone
         val parts = e.save().split('|')
-        val tiles = parts[11].split(';').joinToString(";") { tile ->
+        val tiles = parts[12].split(';').joinToString(";") { tile ->
             val f = tile.split(',')
             val zone = if (f[11].toInt() != 0) ZoneType.PIPE.ordinal else f[1].toInt()
             (listOf(f[0], zone.toString()) + f.subList(2, 11)).joinToString(",")
@@ -1035,10 +1591,10 @@ class CityEngineTest {
     fun fireAndCrimeSurviveASave() {
         val e = city(19)
         val parts = e.save().split('|')
-        assertEquals("CC7", parts[0])
+        assertEquals("CC11", parts[0])
 
         // graft a fire and a crime mark onto the first tile
-        val tiles = parts[11].split(';').toMutableList()
+        val tiles = parts[12].split(';').toMutableList()
         val fields = tiles[0].split(',').toMutableList()
         fields[14] = "3"
         fields[15] = "7"
@@ -1053,7 +1609,7 @@ class CityEngineTest {
         assertEquals(1, loaded.activeCrime)
 
         // a CC6 save has no disaster fields and loads clean
-        val cc6Tiles = parts[11].split(';').joinToString(";") { tile ->
+        val cc6Tiles = parts[12].split(';').joinToString(";") { tile ->
             tile.split(',').take(14).joinToString(",")
         }
         val cc6 = (listOf("CC6") + parts.subList(1, 11) + listOf(cc6Tiles)).joinToString("|")
@@ -1071,8 +1627,8 @@ class CityEngineTest {
 
         // strip the CC6-only fields: the tax rate before the tiles
         val parts = e.save().split('|')
-        assertEquals("CC7", parts[0])
-        val cc5 = (listOf("CC5") + parts.subList(1, 10) + listOf(parts[11])).joinToString("|")
+        assertEquals("CC11", parts[0])
+        val cc5 = (listOf("CC5") + parts.subList(1, 10) + listOf(parts[12])).joinToString("|")
 
         val loaded = CityEngine.load(cc5)
         assertNotNull("a save from the previous version still loads", loaded)
@@ -1087,7 +1643,7 @@ class CityEngineTest {
         val e = city()
         val parts = e.save().split('|')
         // rewrite as a CC4 save: drop the goals and stable-days fields
-        val cc4 = (listOf("CC4") + parts.subList(1, 8) + listOf(parts[11])).joinToString("|")
+        val cc4 = (listOf("CC4") + parts.subList(1, 8) + listOf(parts[12])).joinToString("|")
         val loaded = CityEngine.load(cc4)
         assertNotNull(loaded)
         assertEquals(true, loaded!!.isUnlocked(Tool.RAIL))
@@ -1280,6 +1836,90 @@ class CityEngineTest {
             for (c in 0 until e.cols) {
                 run = if (e.tile(c, r)!!.terrain != Terrain.WATER) run + 1 else 0
                 if (run >= length) return (c - length + 1) to r
+            }
+        }
+        return null
+    }
+
+    /** Water cells still beside this one; each adds to the fill price. */
+    private fun waterSides(e: CityEngine, c: Int, r: Int): Int =
+        listOf(c - 1 to r, c + 1 to r, c to r - 1, c to r + 1)
+            .count { (cc, rr) -> e.inBounds(cc, rr) && e.tile(cc, rr)!!.terrain == Terrain.WATER }
+
+    /** The first water cell that touches dry land, so it can be filled. */
+    private fun findShoreWater(e: CityEngine): Pair<Int, Int> {
+        val found = findTile(e) { it.terrain == Terrain.WATER }
+            ?: error("the map has no water")
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                if (e.tile(c, r)!!.terrain != Terrain.WATER) continue
+                if (waterSides(e, c, r) < 4) return c to r
+            }
+        }
+        return found
+    }
+
+    /** Water with no dry neighbour: filling there would float free of the island. */
+    private fun findOpenWater(e: CityEngine): Pair<Int, Int>? {
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                if (e.tile(c, r)!!.terrain != Terrain.WATER) continue
+                if (waterSides(e, c, r) == 4) return c to r
+            }
+        }
+        return null
+    }
+
+    /** A fillable bank cell and the open water right behind it. */
+    private fun findBankAndOpenWater(e: CityEngine): Pair<Pair<Int, Int>, Pair<Int, Int>>? {
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                if (e.tile(c, r)!!.terrain != Terrain.WATER) continue
+                if (waterSides(e, c, r) == 4) continue
+                for ((cc, rr) in listOf(c - 1 to r, c + 1 to r, c to r - 1, c to r + 1)) {
+                    if (!e.inBounds(cc, rr)) continue
+                    if (e.tile(cc, rr)!!.terrain != Terrain.WATER) continue
+                    if (waterSides(e, cc, rr) == 4) return (c to r) to (cc to rr)
+                }
+            }
+        }
+        return null
+    }
+
+    /** Dry land with at least one water neighbour. */
+    private fun findBankland(e: CityEngine): Pair<Int, Int>? {
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                val t = e.tile(c, r)!!
+                if (t.terrain != Terrain.WATER && t.waterfront) return c to r
+            }
+        }
+        return null
+    }
+
+    /** Empty dry land away from the water, so it is no use for a canal. */
+    private fun findDryLand(e: CityEngine): Pair<Int, Int>? {
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                val t = e.tile(c, r)!!
+                if (t.terrain != Terrain.WATER && !t.waterfront && t.zone == ZoneType.NONE) {
+                    return c to r
+                }
+            }
+        }
+        return null
+    }
+
+    /** In-bounds neighbours of a cell that are not water. */
+    private fun inBoundsLandSides(e: CityEngine, c: Int, r: Int): Int =
+        listOf(c - 1 to r, c + 1 to r, c to r - 1, c to r + 1)
+            .count { (cc, rr) -> e.inBounds(cc, rr) && e.tile(cc, rr)!!.terrain != Terrain.WATER }
+
+    private fun findWaterWithSides(e: CityEngine, sides: Int): Pair<Int, Int>? {
+        for (r in 0 until e.rows) {
+            for (c in 0 until e.cols) {
+                if (e.tile(c, r)!!.terrain != Terrain.WATER) continue
+                if (waterSides(e, c, r) == sides) return c to r
             }
         }
         return null

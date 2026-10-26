@@ -30,10 +30,12 @@ You start with **$15,000** and a 24×24 island split by a river.
 | Fire station | $800 | Covers 6 tiles and protects the neighbourhood |
 | Hospital | $1,200 | Covers 7 tiles and keeps citizens healthy |
 | Airport | $6,000 | Takes a clear 2x2 block beside a road, hires 90 staff and boosts shops |
+| Fill (reclaim) | $90 + $30 per water side | Dredges a water cell that touches the shore into buildable land; deeper water costs more |
+| Canal | $100 + $30 per land side | Cuts a channel into empty land that touches water, so you can bring the river inland |
 | Bulldoze | free | Clears a tile or a whole 2x2 block and refunds 25% |
 | Pan | free | One-finger camera drag (pinch works any time) |
 
-Tap once to build a tile, or drag to paint roads, rail and zones in a line. Utilities, services and airports always snap to a single tap. Zones display an **R / C / I** marker until a building grows, plus badges for a missing road (red **!**), power (amber **bolt**) and water (blue **droplet**).
+Tap once to build a tile, or drag to paint roads, rail, zones and canals in a line. **FILL** works the other way: drag out a rectangle and release to raise the whole patch. Utilities, services and airports always snap to a single tap. Zones display an **R / C / I** marker until a building grows, plus badges for a missing road (red **!**), power (amber **bolt**) and water (blue **droplet**).
 
 ### Utilities, layers and transit
 
@@ -43,6 +45,24 @@ Tap once to build a tile, or drag to paint roads, rail and zones in a line. Util
 - A **train station** must be built beside the rail line. It counts as transit access itself and pushes access out to every lot within 5 tiles, so a single station can serve a whole neighbourhood instead of only the blocks touching the track.
 - **Subway tunnels** are a third buried layer. They run under buildings and under the river, and two or more connected tunnel tiles make a line. Tunnels alone carry nobody: a **subway station** standing on or beside a live line creates transit access for every lot within 6 tiles, and costs upkeep until you do. Transit access from either rail or subway speeds up growth and maturity.
 - A **highway** is a four-lane road. Lots beside it get road access exactly like a normal street, cars cross it faster, and the extra capacity feeds commercial and industrial demand.
+
+### Building on water
+
+Water is not dead space, but it is not free either. There are three ways across it, and they trade price against permanence:
+
+- **Bridge it** — a ROAD ($90) or HIGHWAY ($300) tile laid on water becomes a bridge. Cars, power and water mains all cross it, but the cell stays water, so nothing can be zoned on it.
+- **Tunnel under it** — a SUBWAY ($160) is a buried layer; two or more connected tunnels make a line that stations can serve. It takes no surface space at all.
+- **Fill it** — the **FILL** tool raises dry land out of the water. A cell costs $90 plus $30 for every water cell still beside it: filling a narrow creek costs $150, a typical waterfront cell $180, and a plot in the middle of the river $210. The cell has to touch existing land or land filled earlier, so you reclaim outward from the shore.
+
+**FILL drags out a patch.** Touch the water, drag to the opposite corner and the cells the fill would reach light up while the hint row quotes the cell count and the total price; let go to pay and build. A tap fills a single cell. Nothing is charged while dragging, the whole patch is one undo step, and if the toll is more than the treasury the cells turn red and nothing is built. A rectangle may include dry land: only the water that can reach the shore is filled.
+
+Filled cells become ordinary ground: zone them, water them, power them, park them. Filling is permanent — it is saved as reclaimed ground, bulldozing a filled cell leaves the land behind, and any pipe, cable or tunnel under it survives the fill. A bridge that gets filled turns into a plain road on dry land. Compare before you spend: a bridge across the channel is $90, while filling the same cell to zone it costs around $180 and is forever.
+
+### Canals
+
+The **CANAL** tool is the mirror image of FILL: it floods an empty land cell next to water. A cell costs $100 plus $30 for every land side it still has, so nibbling a bay inland is cheap and cutting deeper into the map costs more. It has to start at the water's edge and work outward, and it refuses occupied ground — roads, zones, buildings, or a buried pipe, cable or tunnel are in the way. Drag with the tool to cut a channel, and fill it back in later if you change your mind.
+
+Canal or natural, water is worth money to the tax roll: every lot with open water on one of its four sides, and every lot standing on filled ground, holds **12% more** residents or jobs than the same lot inland. The info tool shows the bonus on those cells. A canal through a district is an expensive way to raise its capacity — and it costs you the cell the water sits on.
 
 ### Big buildings
 
@@ -81,7 +101,7 @@ The city saves automatically every month and whenever the app is paused; **NEW**
 
 ## Progression & goals
 
-A fresh city starts with a basic set of tools: roads, zones, parks, power, water and the buried mains/cables. Everything else — rail, highways, train and subway stations, subways, the emergency services and the airport — has to be **earned** by growing the city. Tap the goal counter (**e.g. `0/8`**) in the top bar to open the goals sheet.
+A fresh city starts with a basic set of tools: roads, zones, parks, power, water, fill, canals and the buried mains/cables. Everything else — rail, highways, train and subway stations, subways, the emergency services and the airport — has to be **earned** by growing the city. Tap the goal counter (**e.g. `0/8`**) in the top bar to open the goals sheet.
 
 Each milestone pays a cash bonus and, for the early ones, unlocks new tools:
 

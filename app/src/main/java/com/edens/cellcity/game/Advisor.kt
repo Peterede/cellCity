@@ -197,6 +197,16 @@ object CityAdvisor {
                 )
             )
         }
+        if (engine.loanBalance > 0) {
+            issues.add(
+                CityIssue(
+                    "Repaying the emergency loan",
+                    "${money(engine.loanBalance)} left - " +
+                        "$${Config.LOAN_DAILY_PAYMENT}/day goes to the bank while the books are black.",
+                    IssueLevel.NOTICE
+                )
+            )
+        }
         if (engine.taxRate > 15) {
             issues.add(
                 CityIssue(
@@ -237,10 +247,19 @@ object CityAdvisor {
             engine.vacantZoneCount * 2 >= engine.zoneCount &&
             blackouts == 0 && dry == 0 && cutOff == 0
         ) {
+            val res = engine.vacantCount(ZoneType.RESIDENTIAL)
+            val com = engine.vacantCount(ZoneType.COMMERCIAL)
+            val ind = engine.vacantCount(ZoneType.INDUSTRIAL)
+            val breakdown = listOfNotNull(
+                if (res > 0) "$res RES" else null,
+                if (com > 0) "$com COM" else null,
+                if (ind > 0) "$ind IND" else null
+            ).joinToString(", ")
             issues.add(
                 CityIssue(
                     "Zoned lots sit empty",
-                    "${engine.vacantZoneCount} lots never grew - demand or services are missing.",
+                    "${engine.vacantZoneCount} lots never grew ($breakdown) - the city has " +
+                        "to grow into this zoning; clear surplus lots if you need the space.",
                     IssueLevel.NOTICE
                 )
             )

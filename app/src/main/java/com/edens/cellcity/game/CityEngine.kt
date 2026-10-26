@@ -14,14 +14,24 @@ class CityEngine(
     val cols: Int = Config.COLS,
     val rows: Int = Config.ROWS,
     seed: Long = 20261020L,
-    private val enforceUnlocks: Boolean = true
+    private val enforceUnlocks: Boolean = true,
+    difficultyLevel: Difficulty = Difficulty.NORMAL,
+    mapStyleLevel: MapStyle = MapStyle.RIVERLANDS
 ) {
     private val seedValue: Long = seed
     private val rng = Random(seed)
+    /** Separate stream for cards and contracts, so the map's own rolls stay stable. */
+    private val eventRng = Random(seed + 7_919L)
     private val grid: Array<Array<Tile>> = Array(rows) { Array(cols) { Tile() } }
     private val events = ArrayList<CityEvent>()
 
-    var funds: Int = Config.START_FUNDS
+    var difficulty: Difficulty = difficultyLevel
+        private set
+
+    var mapStyle: MapStyle = mapStyleLevel
+        private set
+
+    var funds: Int = difficulty.startFunds
         private set
     var day: Int = 1
         private set
@@ -77,6 +87,42 @@ class CityEngine(
     /** Last crime warning stage, so the city is not spammed every day. */
     private var crimeStage = 0
 
+    private val records = ArrayList<CityRecord>()
+
+    /** Closing snapshot of every month so far, oldest first: the city's record. */
+    val history: List<CityRecord> get() = records
+
+    // --- decisions, contracts and stakes -----------------------------------
+    /** Days until the next decision card is drawn. */
+    var decisionCooldown: Int = Config.DECISION_FIRST_DAYS
+        private set
+
+    /** The card waiting for the mayor. A live prompt, so it is not saved. */
+    var pendingDecision: PendingDecision? = null
+        private set
+
+    private var lastDecisionKind: DecisionKind? = null
+
+    /** The region's current side objective, or null between contracts. */
+    var contract: Contract? = null
+        private set
+    var contractCooldown: Int = 0
+        private set
+
+    /** Consecutive days the treasury has been in the red. */
+    var debtDays: Int = 0
+        private set
+    var bankrupt: Boolean = false
+        private set
+    var bailouts: Int = 0
+        private set
+    /** Emergency loan still to be repaid, a little each day. */
+    var loanBalance: Int = 0
+        private set
+    /** Permanent smog added by decisions such as a factory permit, 0..1. */
+    var pollutionOffset: Float = 0f
+        private set
+
     // --- progression -------------------------------------------------------
     /** Consecutive days the city has counted as stable (populous, happy, in the black). */
     var stableDays: Int = 0
@@ -94,6 +140,20 @@ class CityEngine(
         generateLandscape()
         refreshInfrastructure()
         updateDemand()
+        records.add(
+            CityRecord(
+                month = month,
+                year = year,
+                population = 0,
+                jobs = 0,
+                funds = funds,
+                happiness = happiness.roundToInt().coerceIn(0, 100),
+                pollution = 0,
+                income = 0,
+                expenses = 0
+            )
+        )
+        contract = offerContract()
     }
 
     // ------------------------------------------------------------------ access
@@ -128,6 +188,9 @@ class CityEngine(
     val zoneCount: Int get() = countTiles { it.zone.isZone }
     val poweredBuildingCount: Int get() = countTiles { it.developed && it.powered }
     val vacantZoneCount: Int get() = countTiles { it.zone.isZone && it.level == 0 }
+
+    /** Vacant zoned lots of one type: zoned but never built on. */
+    fun vacantCount(zone: ZoneType): Int = countTiles { it.zone == zone && it.level == 0 }
     val mergedBlockCount: Int get() = countBlockOrigins { it.zone.isZone }
 
     val developedHousing: Int
@@ -144,6 +207,29 @@ class CityEngine(
 
     val dateLabel: String
         get() = "${MONTHS[(month - 1).coerceIn(0, 11)]} $year"
+
+    /** Days since the first day of the city; contract deadlines use it. */
+    val totalDays: Int
+        get() = (year - Config.START_YEAR) * 12 * Config.DAYS_PER_MONTH +
+            (month - 1) * Config.DAYS_PER_MONTH + (day - 1)
+
+    /** One number for how well the city is doing, used by medals and awards. */
+    val cityScore: Int
+        get() = population + (happiness * 8f).roundToInt() + completed.size * 500 +
+            parkCount * 40 + jobs / 2
+
+    /** 0..4: how many score thresholds the city has passed. */
+    val medalCount: Int
+        get() = SCORE_MEDALS.count { cityScore >= it }
+
+    val medalName: String
+        get() = when (medalCount) {
+            0 -> "No medal"
+            1 -> "Bronze"
+            2 -> "Silver"
+            3 -> "Gold"
+            else -> "Platinum"
+        }
 
     // ------------------------------------------------------------- progression
 
@@ -195,6 +281,231 @@ class CityEngine(
         Milestone.SKYLINE -> 1
     }
 
+    // ---------------------------------------------------------------- contracts
+
+    /** How far the active contract has come, in its own units. */
+    fun contractProgress(c: Contract): Int = when (c.kind) {
+        ContractKind.POPULATION -> population
+        ContractKind.TREASURY -> funds
+        ContractKind.FIRE_COVER -> (fireCoverage * 100f).roundToInt()
+        ContractKind.POLICE_COVER -> (policeCoverage * 100f).roundToInt()
+        ContractKind.HAPPINESS -> happiness.roundToInt()
+        ContractKind.PARKS -> parkCount
+    }
+
+    /** Days before the contract lapses; negative once it is overdue. */
+    fun contractDaysLeft(c: Contract): Int = c.deadlineDay - totalDays
+
+    /** Picks a contract that asks for something the city does not have yet. */
+    private fun offerContract(): Contract {
+        val pool = ArrayList<ContractKind>()
+        if (population < 250) pool.add(ContractKind.POPULATION)
+        // only ask for cover the city can actually buy: the tools unlock over time
+        if (fireCoverage < 0.7f && isUnlocked(Tool.FIRE)) pool.add(ContractKind.FIRE_COVER)
+        if (policeCoverage < 0.7f && isUnlocked(Tool.POLICE)) {
+            pool.add(ContractKind.POLICE_COVER)
+        }
+        if (funds in 0..11_999) pool.add(ContractKind.TREASURY)
+        if (happiness < 68f) pool.add(ContractKind.HAPPINESS)
+        if (parkCount < 4) pool.add(ContractKind.PARKS)
+        if (pool.isEmpty()) pool.add(ContractKind.POPULATION)
+        val kind = pool[eventRng.nextInt(pool.size)]
+        val target = when (kind) {
+            ContractKind.POPULATION -> max(20, population + max(40, population / 3))
+            ContractKind.TREASURY -> max(2_000, funds + 3_000)
+            ContractKind.FIRE_COVER,
+            ContractKind.POLICE_COVER -> 70
+            ContractKind.HAPPINESS -> min(100, happiness.roundToInt() + 8)
+            ContractKind.PARKS -> parkCount + 3
+        }
+        val reward = when (kind) {
+            ContractKind.POPULATION, ContractKind.TREASURY -> 900
+            ContractKind.FIRE_COVER, ContractKind.POLICE_COVER -> 700
+            ContractKind.HAPPINESS, ContractKind.PARKS -> 800
+        }
+        return Contract(kind, target, totalDays + Config.CONTRACT_DAYS, reward, totalDays)
+    }
+
+    private fun updateContracts() {
+        if (contractCooldown > 0) contractCooldown--
+        val active = contract
+        if (active == null) {
+            if (contractCooldown <= 0) contract = offerContract()
+            return
+        }
+        if (contractProgress(active) >= active.target) {
+            funds += active.reward
+            happiness = min(100f, happiness + 3f)
+            events.add(CityEvent.ContractComplete(active))
+            contract = null
+            contractCooldown = Config.CONTRACT_COOLDOWN_DAYS
+        } else if (totalDays > active.deadlineDay) {
+            events.add(CityEvent.ContractExpired(active))
+            contract = null
+            contractCooldown = Config.CONTRACT_COOLDOWN_DAYS
+        }
+    }
+
+    // ---------------------------------------------------------------- decisions
+
+    /** Draws a decision card once the cooldown runs out and the city is big enough. */
+    private fun updateDecisions() {
+        if (pendingDecision != null) return
+        if (decisionCooldown > 0) {
+            decisionCooldown--
+            return
+        }
+        if (population < Config.DECISION_MIN_POPULATION) {
+            decisionCooldown = 5
+            return
+        }
+        val eligible = ArrayList<DecisionKind>()
+        if (funds < 12_000) eligible.add(DecisionKind.GRANT)
+        if (population >= 100) eligible.add(DecisionKind.FACTORY_PERMIT)
+        if (funds >= 900) eligible.add(DecisionKind.FESTIVAL)
+        if (population >= 60) eligible.add(DecisionKind.HEAT_WAVE)
+        if (taxRate >= 15) eligible.add(DecisionKind.TAX_REVOLT)
+        if (plantCount > 0 && population >= 50) eligible.add(DecisionKind.GRID_FAILURE)
+        eligible.remove(lastDecisionKind)
+        if (eligible.isEmpty()) {
+            decisionCooldown = 10
+            return
+        }
+        val kind = eligible[eventRng.nextInt(eligible.size)]
+        lastDecisionKind = kind
+        pendingDecision = buildDecision(kind)
+        decisionCooldown = Config.DECISION_GAP_MIN +
+            eventRng.nextInt(Config.DECISION_GAP_MAX - Config.DECISION_GAP_MIN + 1)
+        events.add(CityEvent.DecisionOffered(pendingDecision!!))
+    }
+
+    private fun buildDecision(kind: DecisionKind): PendingDecision = when (kind) {
+        DecisionKind.GRANT -> PendingDecision(
+            kind,
+            "A regional grant",
+            "The province offers $2,000 for city hall, on the understanding that the money is spent their way.",
+            listOf(
+                DecisionOption("Take the grant", "+$2,000 now, but the strings cost 2 happiness"),
+                DecisionOption("Refuse it", "No money, +4 happiness for standing independent")
+            )
+        )
+
+        DecisionKind.FACTORY_PERMIT -> PendingDecision(
+            kind,
+            "A factory wants a permit",
+            "An industrial firm will build on the edge of town. The jobs and fees are real; so is the smoke.",
+            listOf(
+                DecisionOption("Approve the permit", "+$2,500, permanent smog, -4 happiness"),
+                DecisionOption("Turn it down", "+3 happiness, no smog, no fee")
+            )
+        )
+
+        DecisionKind.FESTIVAL -> PendingDecision(
+            kind,
+            "A festival in the park",
+            "Organisers ask the city to underwrite a weekend festival. It would lift the mood - at a price.",
+            listOf(
+                DecisionOption("Fund the festival", "-$700, +9 happiness"),
+                DecisionOption("Let it pass", "Save the money, -2 happiness")
+            )
+        )
+
+        DecisionKind.HEAT_WAVE -> PendingDecision(
+            kind,
+            "A heat wave",
+            "The forecast is brutal. The city can open cooling centres, or leave people to cope.",
+            listOf(
+                DecisionOption("Open cooling centres", "-$500, +3 happiness"),
+                DecisionOption("Ride it out", "-7 happiness")
+            )
+        )
+
+        DecisionKind.TAX_REVOLT -> PendingDecision(
+            kind,
+            "Taxpayers are revolting",
+            "At ${taxRate}% the tax rate has become the talk of every shop counter in town.",
+            listOf(
+                DecisionOption("Cut taxes by 4%", "Lower income, +4 happiness"),
+                DecisionOption("Hold the line", "Keep the income, -8 happiness")
+            )
+        )
+
+        DecisionKind.GRID_FAILURE -> PendingDecision(
+            kind,
+            "The grid is straining",
+            "A transformer is failing. Crews can fix it now, or the city can gamble on it holding.",
+            listOf(
+                DecisionOption("Repair it now", "-$900, no blackout"),
+                DecisionOption("Wait and see", "Keep the money, -6 happiness")
+            )
+        )
+    }
+
+    /**
+     * Applies the mayor's choice and returns a line for the banner, or null when
+     * there is no card waiting (or the choice is out of range).
+     */
+    fun resolveDecision(index: Int): String? {
+        val card = pendingDecision ?: return null
+        if (index !in card.options.indices) return null
+        pendingDecision = null
+        return when (card.kind) {
+            DecisionKind.GRANT -> if (index == 0) {
+                funds += 2_000
+                happiness = (happiness - 2f).coerceAtLeast(0f)
+                "Grant accepted: +$2,000, -2 happiness"
+            } else {
+                happiness = min(100f, happiness + 4f)
+                "Grant refused: citizens like the independence"
+            }
+
+            DecisionKind.FACTORY_PERMIT -> if (index == 0) {
+                funds += 2_500
+                pollutionOffset = (pollutionOffset + 0.10f).coerceAtMost(1f)
+                happiness = (happiness - 4f).coerceAtLeast(0f)
+                "Permit approved: +$2,500, but the air got worse"
+            } else {
+                happiness = min(100f, happiness + 3f)
+                "Permit refused: the neighbourhood breathes easier"
+            }
+
+            DecisionKind.FESTIVAL -> if (index == 0) {
+                funds -= 700
+                happiness = min(100f, happiness + 9f)
+                "Festival funded: the city is in a fine mood"
+            } else {
+                happiness = (happiness - 2f).coerceAtLeast(0f)
+                "No festival: a quiet weekend, a few grumbles"
+            }
+
+            DecisionKind.HEAT_WAVE -> if (index == 0) {
+                funds -= 500
+                happiness = min(100f, happiness + 3f)
+                "Cooling centres open: people are grateful"
+            } else {
+                happiness = (happiness - 7f).coerceAtLeast(0f)
+                "The heat wave hurts the city's mood"
+            }
+
+            DecisionKind.TAX_REVOLT -> if (index == 0) {
+                setTaxRate(taxRate - 4)
+                happiness = min(100f, happiness + 4f)
+                "Taxes cut to ${taxRate}%: the street calms down"
+            } else {
+                happiness = (happiness - 8f).coerceAtLeast(0f)
+                "The rate holds at ${taxRate}%: taxpayers are furious"
+            }
+
+            DecisionKind.GRID_FAILURE -> if (index == 0) {
+                funds -= 900
+                "Transformer repaired: the lights stayed on"
+            } else {
+                happiness = (happiness - 6f).coerceAtLeast(0f)
+                "The grid held - barely - and citizens noticed the gamble"
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ build
 
     fun baseCost(tool: Tool): Int = when (tool) {
@@ -216,6 +527,8 @@ class CityEngine(
         Tool.FIRE -> Config.COST_FIRE
         Tool.HOSPITAL -> Config.COST_HOSPITAL
         Tool.AIRPORT -> Config.COST_AIRPORT
+        Tool.RECLAIM -> Config.COST_RECLAIM
+        Tool.CANAL -> Config.COST_CANAL
         Tool.BULLDOZE, Tool.PAN, Tool.INFO -> 0
     }
 
@@ -229,6 +542,8 @@ class CityEngine(
                 Config.COST_HIGHWAY
             }
             Tool.PIPE, Tool.POWERLINE, Tool.SUBWAY -> layerCost(tool, t.terrain)
+            Tool.RECLAIM -> reclaimCost(col, row)
+            Tool.CANAL -> canalCost(col, row)
             else -> baseCost(tool)
         }
     }
@@ -240,6 +555,8 @@ class CityEngine(
         if (tool == Tool.BULLDOZE) return BuildResult.OK
         if (!isUnlocked(tool)) return BuildResult.LOCKED
         if (tool.isLayer) return canBuildLayer(tool, col, row)
+        if (tool == Tool.RECLAIM) return canReclaim(col, row)
+        if (tool == Tool.CANAL) return canDig(col, row)
         if (t.zone == tool.zone) return BuildResult.OK
         if (tool == Tool.AIRPORT) return canBuildAirport(col, row)
         if (tool == Tool.STATION) return canBuildStation(col, row)
@@ -284,6 +601,174 @@ class CityEngine(
             Config.COST_SUBWAY
         }
         else -> 0
+    }
+
+    /**
+     * Dredging is shoreline work: the cell has to be water, and it has to touch
+     * dry land (or land raised earlier) so the new ground joins the island.
+     */
+    private fun canReclaim(col: Int, row: Int): BuildResult {
+        if (grid[row][col].terrain != Terrain.WATER) return BuildResult.NOT_WATER
+        if (!touchesShore(col, row)) return BuildResult.NO_SHORE
+        if (funds < reclaimCost(col, row)) return BuildResult.NO_FUNDS
+        return BuildResult.OK
+    }
+
+    private fun touchesShore(col: Int, row: Int): Boolean {
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (!inBounds(c, r)) continue
+            if (grid[r][c].terrain != Terrain.WATER) return true
+        }
+        return false
+    }
+
+    /**
+     * Filling a shallow waterfront cell is cheap; every water cell still beside
+     * the plot adds a surcharge, so a causeway into the middle of the river
+     * costs more than widening the bank.
+     */
+    private fun reclaimCost(col: Int, row: Int): Int {
+        var water = 0
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (inBounds(c, r) && grid[r][c].terrain == Terrain.WATER) water++
+        }
+        return Config.COST_RECLAIM + water * Config.COST_RECLAIM_DEEP
+    }
+
+    /**
+     * Canals are shoreline work too, only in reverse: the cell has to be empty
+     * dry land, and it has to touch water so the new channel joins the river.
+     */
+    private fun canDig(col: Int, row: Int): BuildResult {
+        val t = grid[row][col]
+        if (t.terrain == Terrain.WATER) return BuildResult.ALREADY_WATER
+        if (t.zone != ZoneType.NONE) return BuildResult.OCCUPIED
+        if (t.pipe || t.powerline || t.subway) return BuildResult.LAYERED
+        if (!touchesWater(col, row)) return BuildResult.NO_WATER_EDGE
+        if (funds < canalCost(col, row)) return BuildResult.NO_FUNDS
+        return BuildResult.OK
+    }
+
+    private fun touchesWater(col: Int, row: Int): Boolean {
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (!inBounds(c, r)) continue
+            if (grid[r][c].terrain == Terrain.WATER) return true
+        }
+        return false
+    }
+
+    /** A bank cell is cheap to dig; cutting deeper into the land costs more. */
+    private fun canalCost(col: Int, row: Int): Int {
+        var land = 0
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (inBounds(c, r) && grid[r][c].terrain != Terrain.WATER) land++
+        }
+        return Config.COST_CANAL + land * Config.COST_CANAL_LAND
+    }
+
+    /**
+     * Works out what filling a rectangle of cells would raise, outward from the
+     * shore, and what it would cost. Nothing is changed, so the UI can show the
+     * quote while the player drags and only spend the money on release.
+     */
+    fun planFill(col1: Int, row1: Int, col2: Int, row2: Int): FillPlan {
+        if (!inBounds(col1, row1) || !inBounds(col2, row2)) {
+            return FillPlan(emptyList(), 0, BuildResult.OUT_OF_BOUNDS)
+        }
+        val left = min(col1, col2)
+        val right = max(col1, col2)
+        val top = min(row1, row2)
+        val bottom = max(row1, row2)
+        val wet = BooleanArray(rows * cols) {
+            grid[it / cols][it % cols].terrain == Terrain.WATER
+        }
+        var waterInRect = 0
+        for (r in top..bottom) {
+            for (c in left..right) {
+                if (wet[r * cols + c]) waterInRect++
+            }
+        }
+        if (waterInRect == 0) return FillPlan(emptyList(), 0, BuildResult.NOT_WATER)
+
+        val cells = ArrayList<Int>(waterInRect)
+        var cost = 0
+        val queue = ArrayDeque<Int>()
+        for (r in top..bottom) {
+            for (c in left..right) {
+                val index = r * cols + c
+                if (wet[index] && touchesLandIn(wet, c, r)) queue.add(index)
+            }
+        }
+        while (queue.isNotEmpty()) {
+            val index = queue.removeFirst()
+            if (!wet[index]) continue
+            val c = index % cols
+            val r = index / cols
+            wet[index] = false
+            cells.add(index)
+            cost += Config.COST_RECLAIM +
+                waterNeighboursIn(wet, c, r) * Config.COST_RECLAIM_DEEP
+            for (d in 0 until 4) {
+                val nc = c + DC[d]
+                val nr = r + DR[d]
+                if (nc < left || nc > right || nr < top || nr > bottom) continue
+                val next = nr * cols + nc
+                if (wet[next]) queue.add(next)
+            }
+        }
+        if (cells.isEmpty()) return FillPlan(emptyList(), 0, BuildResult.NO_SHORE)
+        if (funds < cost) return FillPlan(cells, cost, BuildResult.NO_FUNDS)
+        return FillPlan(cells, cost, BuildResult.OK)
+    }
+
+    /** Raises every cell the plan can reach, as one undoable action. */
+    fun fillArea(col1: Int, row1: Int, col2: Int, row2: Int): FillPlan {
+        val plan = planFill(col1, row1, col2, row2)
+        if (plan.result != BuildResult.OK) return plan
+        val fundsBefore = funds
+        val first = plan.cells.first()
+        for (index in plan.cells) {
+            val c = index % cols
+            val r = index / cols
+            snapshotForUndo(listOf(index), Tool.RECLAIM)
+            funds -= reclaimCost(c, r)
+            val t = grid[r][c]
+            // The water goes away for good: no later bulldoze turns it back.
+            t.terrain = Terrain.GRASS
+            t.reclaimed = true
+        }
+        events.add(CityEvent.Built(ZoneType.NONE, first % cols, first / cols))
+        accrueActionCost(fundsBefore)
+        refreshInfrastructure()
+        return plan
+    }
+
+    private fun touchesLandIn(wet: BooleanArray, col: Int, row: Int): Boolean {
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (!inBounds(c, r)) continue
+            if (!wet[r * cols + c]) return true
+        }
+        return false
+    }
+
+    private fun waterNeighboursIn(wet: BooleanArray, col: Int, row: Int): Int {
+        var water = 0
+        for (d in 0 until 4) {
+            val c = col + DC[d]
+            val r = row + DR[d]
+            if (inBounds(c, r) && wet[r * cols + c]) water++
+        }
+        return water
     }
 
     /** Mains, cables and tunnels are layers: they fit under any existing zone or building. */
@@ -388,6 +873,17 @@ class CityEngine(
             refreshInfrastructure()
             return BuildResult.OK
         }
+        if (tool == Tool.RECLAIM) return fillArea(col, row, col, row).result
+        if (tool == Tool.CANAL) {
+            snapshotForUndo(listOf(row * cols + col), tool)
+            funds -= canalCost(col, row)
+            t.terrain = Terrain.WATER
+            t.reclaimed = false
+            events.add(CityEvent.Built(ZoneType.NONE, col, row))
+            accrueActionCost(fundsBefore)
+            refreshInfrastructure()
+            return BuildResult.OK
+        }
         if (t.zone == tool.zone) return BuildResult.OK
         if (tool == Tool.AIRPORT) return buildAirport(col, row, fundsBefore)
 
@@ -451,12 +947,13 @@ class CityEngine(
         val crime: Int,
         val merged: Boolean,
         val originCol: Int,
-        val originRow: Int
+        val originRow: Int,
+        val reclaimed: Boolean
     ) {
         constructor(t: Tile) : this(
             t.terrain, t.zone, t.level, t.population, t.jobs, t.maturity, t.variant,
             t.distress, t.pipe, t.powerline, t.subway, t.fire, t.crime, t.merged,
-            t.originCol, t.originRow
+            t.originCol, t.originRow, t.reclaimed
         )
     }
 
@@ -521,6 +1018,7 @@ class CityEngine(
             t.merged = state.merged
             t.originCol = state.originCol
             t.originRow = state.originRow
+            t.reclaimed = state.reclaimed
         }
         funds -= entry.fundsDelta
         var pop = 0
@@ -636,6 +1134,8 @@ class CityEngine(
         updateHappiness()
         updateEconomy()
         updateProgression()
+        updateContracts()
+        updateDecisions()
         advanceDate()
     }
 
@@ -646,7 +1146,17 @@ class CityEngine(
         updateWater()
         updatePower()
         updateServices()
+        updateWaterfront()
         refreshDisasterCounts()
+    }
+
+    /** Marks every cell that has an orthogonal water neighbour (computed, never saved). */
+    private fun updateWaterfront() {
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                grid[r][c].waterfront = touchesWater(c, r)
+            }
+        }
     }
 
     /** Keeps the public fire/crime tallies in step after a build or a load. */
@@ -967,7 +1477,8 @@ class CityEngine(
                 highwayCount * 0.004f +
                 airportCount * 0.10f +
                 railCount * 0.002f -
-                parks * 0.04f,
+                parks * 0.04f +
+                pollutionOffset,
             0f,
             1f
         )
@@ -1259,7 +1770,10 @@ class CityEngine(
                 val t = grid[r][c]
                 if (!t.developed || t.fire > 0) continue
                 if (fireDanger && !t.fireCovered && fires < Config.MAX_ACTIVE_FIRES) {
-                    if (rng.nextFloat() < Config.FIRE_CHANCE * (1f + pollution * 0.5f)) {
+                    if (rng.nextFloat() <
+                        Config.FIRE_CHANCE * (1f + pollution * 0.5f) *
+                            difficulty.incidentScale
+                    ) {
                         t.fire = 1
                         fires++
                         events.add(CityEvent.FireStarted(t.zone, c, r))
@@ -1267,7 +1781,7 @@ class CityEngine(
                     }
                 }
                 if (crimeDanger && t.crime == 0 && !t.policeCovered &&
-                    rng.nextFloat() < Config.CRIME_CHANCE
+                    rng.nextFloat() < Config.CRIME_CHANCE * difficulty.incidentScale
                 ) {
                     t.crime = Config.CRIME_DAYS
                 }
@@ -1365,23 +1879,26 @@ class CityEngine(
     private fun dailyIncome(): Float =
         (population * Config.TAX_PER_RESIDENT + jobs * Config.TAX_PER_JOB) * taxMultiplier()
 
-    private fun dailyExpenses(): Float =
-        roadCount * Config.UPKEEP_ROAD +
-            highwayCount * Config.UPKEEP_HIGHWAY +
-            railCount * Config.UPKEEP_RAIL +
-            pipeCount * Config.UPKEEP_PIPE +
-            powerlineCount * Config.UPKEEP_POWERLINE +
-            stationCount * Config.UPKEEP_STATION +
-            subwayCount * Config.UPKEEP_SUBWAY +
-            subwayStationCount * Config.UPKEEP_SUBWAY_STATION +
-            parkCount * Config.UPKEEP_PARK +
-            plantCount * Config.UPKEEP_PLANT +
-            waterCount * Config.UPKEEP_WATERWORKS +
-            policeCount * Config.UPKEEP_POLICE +
-            fireCount * Config.UPKEEP_FIRE +
-            hospitalCount * Config.UPKEEP_HOSPITAL +
-            airportCount * Config.UPKEEP_AIRPORT +
-            buildingCount * Config.UPKEEP_BUILDING
+    private fun dailyExpenses(): Float {
+        val upkeep =
+            roadCount * Config.UPKEEP_ROAD +
+                highwayCount * Config.UPKEEP_HIGHWAY +
+                railCount * Config.UPKEEP_RAIL +
+                pipeCount * Config.UPKEEP_PIPE +
+                powerlineCount * Config.UPKEEP_POWERLINE +
+                stationCount * Config.UPKEEP_STATION +
+                subwayCount * Config.UPKEEP_SUBWAY +
+                subwayStationCount * Config.UPKEEP_SUBWAY_STATION +
+                parkCount * Config.UPKEEP_PARK +
+                plantCount * Config.UPKEEP_PLANT +
+                waterCount * Config.UPKEEP_WATERWORKS +
+                policeCount * Config.UPKEEP_POLICE +
+                fireCount * Config.UPKEEP_FIRE +
+                hospitalCount * Config.UPKEEP_HOSPITAL +
+                airportCount * Config.UPKEEP_AIRPORT +
+                buildingCount * Config.UPKEEP_BUILDING
+        return upkeep * difficulty.upkeepScale
+    }
 
     private fun updateEconomy() {
         val income = dailyIncome()
@@ -1390,10 +1907,47 @@ class CityEngine(
         funds += net
         monthIncome += income
         monthExpenses += expenses
-        if (funds < 0 && !debtWarned) {
-            debtWarned = true
-            events.add(CityEvent.Notice("The city is in debt - raise income or cut upkeep"))
+        if (funds < 0) {
+            debtDays++
+            // the bank charges for the privilege of running a deficit
+            funds -= max(1, (-funds * Config.DEBT_DAILY_RATE).roundToInt())
+            if (!debtWarned) {
+                debtWarned = true
+                events.add(CityEvent.Notice("The city is in debt - raise income or cut upkeep"))
+            }
+            if (debtDays >= Config.BANKRUPTCY_DAYS && !bankrupt) {
+                bankrupt = true
+                events.add(CityEvent.Bankrupt(funds))
+            }
+        } else {
+            debtDays = 0
+            if (loanBalance > 0) {
+                debtWarned = false
+                val payment = min(loanBalance, min(Config.LOAN_DAILY_PAYMENT, funds))
+                if (payment > 0) {
+                    funds -= payment
+                    loanBalance -= payment
+                }
+            }
         }
+    }
+
+    /** Accepts the emergency loan that ends a bankruptcy, at a stiff price. */
+    fun acceptBailout(): Boolean {
+        if (!bankrupt) return false
+        funds += Config.BAILOUT_CASH
+        loanBalance += Config.BAILOUT_DEBT
+        bankrupt = false
+        debtDays = 0
+        bailouts++
+        happiness = (happiness - 8f).coerceAtLeast(0f)
+        events.add(
+            CityEvent.Notice(
+                "Emergency loan: +$${Config.BAILOUT_CASH} now, " +
+                    "$${Config.BAILOUT_DEBT} to repay"
+            )
+        )
+        return true
     }
 
     /**
@@ -1429,10 +1983,29 @@ class CityEngine(
             }
             val net = (monthIncome - monthExpenses).roundToInt()
             events.add(CityEvent.MonthFinished(finishedMonth, finishedYear, net, population))
+            closeMonth(finishedMonth, finishedYear)
             monthIncome = 0f
             monthExpenses = 0f
             debtWarned = false
         }
+    }
+
+    /** Files the month that has just ended into the city record. */
+    private fun closeMonth(finishedMonth: Int, finishedYear: Int) {
+        records.add(
+            CityRecord(
+                month = finishedMonth,
+                year = finishedYear,
+                population = population,
+                jobs = jobs,
+                funds = funds,
+                happiness = happiness.roundToInt().coerceIn(0, 100),
+                pollution = (pollution * 100f).roundToInt().coerceIn(0, 100),
+                income = monthIncome.roundToInt(),
+                expenses = monthExpenses.roundToInt()
+            )
+        )
+        while (records.size > Config.HISTORY_MONTHS) records.removeAt(0)
     }
 
     // ------------------------------------------------------------------ stats
@@ -1463,11 +2036,13 @@ class CityEngine(
     fun capacityForTile(t: Tile): Int {
         val base = capacityOf(t.zone, t.level)
         if (base == 0) return 0
-        return if (t.merged && t.zone.isZone) {
-            (base * Config.MERGE_CAPACITY_BONUS).roundToInt()
-        } else {
-            base
+        var capacity = base.toFloat()
+        if (t.merged && t.zone.isZone) capacity *= Config.MERGE_CAPACITY_BONUS
+        // Water views sell: a lot beside the river, or on land raised from it, holds more.
+        if (t.zone.isZone && (t.waterfront || t.reclaimed)) {
+            capacity *= Config.WATERFRONT_CAPACITY
         }
+        return capacity.roundToInt()
     }
 
     /**
@@ -1575,7 +2150,7 @@ class CityEngine(
 
     fun save(): String {
         val sb = StringBuilder(4096)
-        sb.append("CC7|")
+        sb.append("CC11|")
         sb.append(funds).append('|')
         sb.append(day).append('|')
         sb.append(month).append('|')
@@ -1586,6 +2161,12 @@ class CityEngine(
         sb.append(completed.joinToString(",") { it.name }).append('|')
         sb.append(stableDays).append('|')
         sb.append(taxRate).append('|')
+        sb.append(
+            records.joinToString(";") {
+                "${it.month},${it.year},${it.population},${it.jobs},${it.funds}," +
+                    "${it.happiness},${it.pollution},${it.income},${it.expenses}"
+            }
+        ).append('|')
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 if (c != 0 || r != 0) sb.append(';')
@@ -1605,9 +2186,26 @@ class CityEngine(
                 sb.append(if (t.powerline) 1 else 0).append(',')
                 sb.append(if (t.subway) 1 else 0).append(',')
                 sb.append(t.fire).append(',')
-                sb.append(t.crime)
+                sb.append(t.crime).append(',')
+                sb.append(if (t.reclaimed) 1 else 0)
             }
         }
+        sb.append('|').append(difficulty.ordinal).append('|')
+        sb.append(decisionCooldown).append('|')
+        val c = contract
+        if (c != null) {
+            sb.append(c.kind.name).append(',').append(c.target).append(',')
+                .append(c.deadlineDay).append(',').append(c.reward).append(',')
+                .append(c.offeredDay)
+        }
+        sb.append('|').append(contractCooldown).append('|')
+        sb.append(debtDays).append('|')
+        sb.append(if (bankrupt) 1 else 0).append('|')
+        sb.append(bailouts).append('|')
+        sb.append(loanBalance).append('|')
+        sb.append(String.format(java.util.Locale.US, "%.2f", pollutionOffset))
+        sb.append('|').append(pendingDecision?.kind?.name ?: "")
+        sb.append('|').append(mapStyle.ordinal)
         return sb.toString()
     }
 
@@ -1623,7 +2221,12 @@ class CityEngine(
         )
         private val DC = intArrayOf(-1, 1, 0, 0)
         private val DR = intArrayOf(0, 0, -1, 1)
-        private val SAVE_VERSIONS = setOf("CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7")
+        private val SAVE_VERSIONS =
+            setOf(
+                "CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7", "CC8", "CC9", "CC10",
+                "CC11"
+            )
+        private val SCORE_MEDALS = intArrayOf(750, 2_000, 4_500, 9_000)
 
         fun load(data: String?): CityEngine? {
             if (data.isNullOrBlank()) return null
@@ -1634,10 +2237,25 @@ class CityEngine(
             val mergedSaves = version != "CC1"
             val layeredPipes = version != "CC1" && version != "CC2"
             val layeredWires = version != "CC1" && version != "CC2" && version != "CC3"
-            val progressive = version == "CC5" || version == "CC6" || version == "CC7"
-            val tunnelled = version == "CC6" || version == "CC7"
-            val disasterSaves = version == "CC7"
-            if (progressive && parts.size != (if (tunnelled) 12 else 11)) return null
+            val reclaimedSaves = version == "CC11"
+            val progressive = version == "CC5" || version == "CC6" ||
+                version == "CC7" || version == "CC8" || version == "CC9" ||
+                version == "CC10" || reclaimedSaves
+            val tunnelled = version == "CC6" || version == "CC7" ||
+                version == "CC8" || version == "CC9" || version == "CC10" || reclaimedSaves
+            val disasterSaves = version == "CC7" || version == "CC8" ||
+                version == "CC9" || version == "CC10" || reclaimedSaves
+            val fullSaves = version == "CC9" || version == "CC10" || reclaimedSaves
+            val mapSaves = version == "CC10" || reclaimedSaves
+            val historySaves = version == "CC8" || fullSaves
+            val expectedParts = when {
+                !tunnelled -> 11
+                mapSaves -> 24
+                fullSaves -> 22
+                historySaves -> 13
+                else -> 12
+            }
+            if (progressive && parts.size != expectedParts) return null
             return try {
                 val w = Config.COLS
                 val h = Config.ROWS
@@ -1645,12 +2263,72 @@ class CityEngine(
                 // Pre-progression saves never had locked tools; keep them all open.
                 engine.legacyUnlockedAll = !progressive
                 val tilePart = when {
+                    historySaves -> parts[12]
                     tunnelled -> parts[11]
                     progressive -> parts[10]
                     else -> parts[8]
                 }
                 if (tunnelled) {
                     engine.taxRate = parts[10].toInt().coerceIn(Config.TAX_MIN, Config.TAX_MAX)
+                }
+                if (historySaves) {
+                    // The constructor lays down an opening record; the save owns the real one.
+                    engine.records.clear()
+                    for (chunk in parts[11].split(';')) {
+                        if (chunk.isEmpty()) continue
+                        val f = chunk.split(',')
+                        if (f.size < 9) return null
+                        engine.records.add(
+                            CityRecord(
+                                month = f[0].toInt().coerceIn(1, 12),
+                                year = f[1].toInt().coerceIn(1900, 3000),
+                                population = f[2].toInt().coerceAtLeast(0),
+                                jobs = f[3].toInt().coerceAtLeast(0),
+                                funds = f[4].toInt(),
+                                happiness = f[5].toInt().coerceIn(0, 100),
+                                pollution = f[6].toInt().coerceIn(0, 100),
+                                income = f[7].toInt().coerceAtLeast(0),
+                                expenses = f[8].toInt().coerceAtLeast(0)
+                            )
+                        )
+                    }
+                    while (engine.records.size > Config.HISTORY_MONTHS) {
+                        engine.records.removeAt(0)
+                    }
+                }
+                if (fullSaves) {
+                    engine.difficulty = Difficulty.values()
+                        .getOrNull(parts[13].toIntOrNull() ?: -1) ?: return null
+                    engine.decisionCooldown = parts[14].toInt().coerceAtLeast(0)
+                    if (parts[15].isNotEmpty()) {
+                        val f = parts[15].split(',')
+                        if (f.size < 5) return null
+                        val kind = ContractKind.values().firstOrNull { it.name == f[0] }
+                            ?: return null
+                        engine.contract = Contract(
+                            kind = kind,
+                            target = f[1].toInt().coerceAtLeast(1),
+                            deadlineDay = f[2].toInt(),
+                            reward = f[3].toInt().coerceAtLeast(0),
+                            offeredDay = f[4].toInt()
+                        )
+                    }
+                    engine.contractCooldown = parts[16].toInt().coerceAtLeast(0)
+                    engine.debtDays = parts[17].toInt().coerceAtLeast(0)
+                    engine.bankrupt = parts[18].toInt() != 0
+                    engine.bailouts = parts[19].toInt().coerceAtLeast(0)
+                    engine.loanBalance = parts[20].toInt().coerceAtLeast(0)
+                    engine.pollutionOffset = parts[21].toFloat().coerceIn(0f, 1f)
+                }
+                if (mapSaves) {
+                    if (parts[22].isNotEmpty()) {
+                        val kind = DecisionKind.values()
+                            .firstOrNull { it.name == parts[22] } ?: return null
+                        engine.lastDecisionKind = kind
+                        engine.pendingDecision = engine.buildDecision(kind)
+                    }
+                    engine.mapStyle = MapStyle.values()
+                        .getOrNull(parts[23].toIntOrNull() ?: -1) ?: return null
                 }
                 if (progressive) {
                     if (parts[8].isNotEmpty()) {
@@ -1714,6 +2392,10 @@ class CityEngine(
                         t.fire = f[14].toInt().coerceAtLeast(0)
                         t.crime = f[15].toInt().coerceAtLeast(0)
                     }
+                    if (reclaimedSaves) {
+                        if (f.size < 17) return null
+                        t.reclaimed = f[16].toInt() != 0
+                    }
                     pop += t.population
                     job += t.jobs
                 }
@@ -1731,7 +2413,16 @@ class CityEngine(
     // ------------------------------------------------------------------ terrain
 
     private fun generateLandscape() {
-        // A river down the west side, crossable only by expensive bridges.
+        when (mapStyle) {
+            MapStyle.RIVERLANDS -> generateRiverlands()
+            MapStyle.BAYSIDE -> generateBayside()
+            MapStyle.TWIN_RIVERS -> generateTwinRivers()
+        }
+        clearSpawn()
+    }
+
+    /** A river down the west side and a lake in the south-east. */
+    private fun generateRiverlands() {
         var c = max(2, cols / 4)
         for (r in 0 until rows) {
             c = (c + rng.nextInt(-1, 2)).coerceIn(2, max(2, cols / 3))
@@ -1739,7 +2430,6 @@ class CityEngine(
             setTerrain(c + 1, r, Terrain.WATER)
         }
 
-        // A lake in the south-east.
         val lakeRow = (rows * 0.72f).toInt()
         val lakeCol = (cols * 0.75f).toInt()
         val lakeRadius = 3
@@ -1754,10 +2444,60 @@ class CityEngine(
             }
         }
 
-        // Forest clumps, kept away from the starting clearing.
+        scatterForestClumps(7)
+        scatterLoneTrees()
+    }
+
+    /** A broad bay in the north-east, a creek running south, open land to the west. */
+    private fun generateBayside() {
+        val bayCol = (cols * 0.78f).toInt()
+        val bayRow = (rows * 0.22f).toInt()
+        val radius = max(4f, min(cols, rows) * 0.27f)
+        for (r in 0 until rows) {
+            for (col in 0 until cols) {
+                val dx = (col - bayCol) / radius
+                val dy = (r - bayRow) / radius
+                if (dx * dx + dy * dy <= 1.0f + rng.nextFloat() * 0.15f) {
+                    setTerrain(col, r, Terrain.WATER)
+                }
+            }
+        }
+
+        var creek = max(bayCol - 3, cols / 2)
+        for (r in bayRow until rows - 1) {
+            creek = (creek + rng.nextInt(-1, 2)).coerceIn(cols / 2, cols - 2)
+            setTerrain(creek, r, Terrain.WATER)
+        }
+
+        scatterForestClumps(7)
+        scatterLoneTrees()
+    }
+
+    /** One channel north to south and another east to west, cutting the map in four. */
+    private fun generateTwinRivers() {
+        var c = max(2, cols / 5)
+        for (r in 0 until rows) {
+            c = (c + rng.nextInt(-1, 2)).coerceIn(2, max(2, cols / 3))
+            setTerrain(c, r, Terrain.WATER)
+            setTerrain(c + 1, r, Terrain.WATER)
+        }
+
+        var row = rows * 2 / 3
+        for (col in 0 until cols) {
+            row = (row + rng.nextInt(-1, 2)).coerceIn(rows / 2, rows - 3)
+            setTerrain(col, row, Terrain.WATER)
+            setTerrain(col, row + 1, Terrain.WATER)
+        }
+
+        scatterForestClumps(9)
+        scatterLoneTrees()
+    }
+
+    /** Forest clumps, kept away from the starting clearing. */
+    private fun scatterForestClumps(count: Int) {
         val spawnCol = cols / 2
         val spawnRow = rows / 2
-        repeat(7) {
+        repeat(count) {
             var fr = rng.nextInt(1, rows - 1)
             var fc = rng.nextInt(1, cols - 1)
             if (abs(fr - spawnRow) < 5 && abs(fc - spawnCol) < 5) {
@@ -1772,15 +2512,23 @@ class CityEngine(
                 fr = fr.coerceIn(0, rows - 1)
             }
         }
+    }
 
-        // A handful of lone trees for texture.
+    /** A handful of lone trees for texture. */
+    private fun scatterLoneTrees() {
+        val spawnCol = cols / 2
+        val spawnRow = rows / 2
         repeat(cols + rows) {
             val fc = rng.nextInt(0, cols)
             val fr = rng.nextInt(0, rows)
             if (abs(fr - spawnRow) > 3 || abs(fc - spawnCol) > 3) setForest(fc, fr)
         }
+    }
 
-        // Guaranteed flat, dry starting square.
+    /** Guaranteed flat, dry starting square. */
+    private fun clearSpawn() {
+        val spawnCol = cols / 2
+        val spawnRow = rows / 2
         for (r in spawnRow - 2..spawnRow + 2) {
             for (col in spawnCol - 2..spawnCol + 2) {
                 if (inBounds(col, r)) {
