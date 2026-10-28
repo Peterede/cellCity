@@ -616,6 +616,8 @@ class CityRenderer(private val density: Float) {
             val bcy = camera.screenY(col + 0.5f, row + 0.5f)
             if (tile.zone == ZoneType.AIRPORT) {
                 drawAirport(canvas, tile, bcx, bcy, hw * 2f, hh * 2f, u, time)
+            } else if (tile.zone == ZoneType.PARK) {
+                drawLargePark(canvas, tile, bcx, bcy, hw * 2f, hh * 2f, u, time)
             } else {
                 drawBlockBase(canvas, tile, bcx, bcy, hw * 2f, hh * 2f, u)
                 drawBlockBuilding(canvas, tile, bcx, bcy, hw * 2f, hh * 2f, u, time)
@@ -632,7 +634,9 @@ class CityRenderer(private val density: Float) {
                 drawSubwayStation(canvas, cx, cy, hw, hh, u, tile.subwayConnected)
             }
             if (tile.zone == ZoneType.PARK) drawPark(canvas, cx, cy, hw, hh, u, col, row, time)
-            if (tile.zone == ZoneType.PLANT) drawPlant(canvas, cx, cy, hw, hh, u, col, row, time)
+            if (tile.zone.isPowerPlant) {
+                drawPlant(canvas, tile, cx, cy, hw, hh, u, col, row, time)
+            }
             if (tile.zone == ZoneType.WATERWORKS) drawWaterWorks(canvas, cx, cy, hw, hh, u)
             if (tile.zone == ZoneType.POLICE) drawPolice(canvas, cx, cy, hw, hh, u)
             if (tile.zone == ZoneType.FIRE) drawFireStation(canvas, cx, cy, hw, hh, u, time)
@@ -1374,6 +1378,26 @@ class CityRenderer(private val density: Float) {
 
     private fun drawPlant(
         canvas: Canvas,
+        tile: Tile,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        col: Int,
+        row: Int,
+        time: Float
+    ) {
+        when (tile.zone) {
+            ZoneType.SOLAR -> drawSolarPlant(canvas, cx, cy, hw, hh, u)
+            ZoneType.WIND -> drawWindPlant(canvas, cx, cy, hw, hh, u, time)
+            ZoneType.NUCLEAR -> drawNuclearPlant(canvas, cx, cy, hw, hh, u, time)
+            else -> drawFossilPlant(canvas, cx, cy, hw, hh, u, col, row, time)
+        }
+    }
+
+    private fun drawFossilPlant(
+        canvas: Canvas,
         cx: Float,
         cy: Float,
         hw: Float,
@@ -1487,6 +1511,287 @@ class CityRenderer(private val density: Float) {
         }
     }
 
+    /** A solar farm: tidy rows of tilted panels on a fenced gravel site. */
+    private fun drawSolarPlant(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float
+    ) {
+        val inkW = max(1.1f, 1.5f * u)
+        diamondPath(cx, cy, hw * 0.86f, hh * 0.86f)
+        fill.color = 0xFFB7C39A.toInt()
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        // service lane between the panel rows
+        line.color = CONCRETE_DARK
+        line.strokeWidth = 3.4f * u
+        path.reset()
+        path.moveTo(cx - hw * 0.62f, cy + hh * 0.34f)
+        path.lineTo(cx + hw * 0.5f, cy - hh * 0.28f)
+        canvas.drawPath(path, line)
+
+        for (panelRow in 0 until 2) {
+            for (panelCol in 0 until 2) {
+                val px = cx + (panelCol - panelRow) * hw * 0.28f
+                val py = cy + (panelCol + panelRow) * hh * 0.24f - hh * 0.08f
+                diamondPath(px, py, hw * 0.21f, hh * 0.21f)
+                fill.color = 0xFF2C5D8C.toInt()
+                canvas.drawPath(path, fill)
+                line.color = INK
+                line.strokeWidth = max(0.9f, 1.2f * u)
+                canvas.drawPath(path, line)
+                diamondPath(px, py - 1.2f * u, hw * 0.16f, hh * 0.16f)
+                fill.color = 0xFF5AB6E8.toInt()
+                canvas.drawPath(path, fill)
+                line.color = 0xFFBFEFFF.toInt()
+                line.strokeWidth = max(0.6f, 0.9f * u)
+                path.reset()
+                path.moveTo(px - hw * 0.1f, py - 1.2f * u)
+                path.lineTo(px + hw * 0.06f, py - 1.2f * u - hh * 0.08f)
+                canvas.drawPath(path, line)
+            }
+        }
+
+        // inverter cabinet on the lane
+        block(
+            canvas, cx + hw * 0.46f, cy + hh * 0.3f, hw * 0.12f, hw * 0.06f, 7f * u,
+            top = 0xFFD8D2C4.toInt(),
+            left = 0xFFB9B7A9.toInt(),
+            right = 0xFF8D8B80.toInt(),
+            inkW = inkW
+        )
+    }
+
+    /** Wind turbines on a small service pad. */
+    private fun drawWindPlant(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        time: Float
+    ) {
+        val inkW = max(1.1f, 1.5f * u)
+        diamondPath(cx, cy, hw * 0.86f, hh * 0.86f)
+        fill.color = 0xFF8BCB7B.toInt()
+        canvas.drawPath(path, fill)
+        line.color = 0xFF2E6B45.toInt()
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        diamondPath(cx, cy + hh * 0.08f, hw * 0.6f, hh * 0.6f)
+        fill.color = CONCRETE
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = max(0.9f, 1.2f * u)
+        canvas.drawPath(path, line)
+
+        windTurbine(canvas, cx - hw * 0.34f, cy + hh * 0.22f, 1f, u, time, 0f)
+        windTurbine(canvas, cx + hw * 0.28f, cy - hh * 0.12f, 0.8f, u, time, 1.9f)
+
+        block(
+            canvas, cx + hw * 0.34f, cy + hh * 0.34f, hw * 0.13f, hw * 0.07f, 6f * u,
+            top = 0xFFD8D2C4.toInt(),
+            left = 0xFFB9B7A9.toInt(),
+            right = 0xFF8D8B80.toInt(),
+            inkW = inkW
+        )
+    }
+
+    private fun windTurbine(
+        canvas: Canvas,
+        x: Float,
+        baseY: Float,
+        scale: Float,
+        u: Float,
+        time: Float,
+        phase: Float
+    ) {
+        val hubY = baseY - 34f * u * scale
+        line.color = INK
+        line.strokeWidth = 4f * u * scale
+        path.reset()
+        path.moveTo(x, baseY)
+        path.lineTo(x, hubY)
+        canvas.drawPath(path, line)
+        line.color = PAPER
+        line.strokeWidth = 2.2f * u * scale
+        canvas.drawPath(path, line)
+
+        val len = 15f * u * scale
+        for (i in 0 until 3) {
+            val angle = time * 1.5f + phase + i * (2f * PI.toFloat() / 3f)
+            val bx = x + cos(angle) * len
+            val by = hubY + sin(angle) * len * 0.55f
+            line.color = INK
+            line.strokeWidth = 3f * u * scale
+            path.reset()
+            path.moveTo(x, hubY)
+            path.lineTo(bx, by)
+            canvas.drawPath(path, line)
+            line.color = PAPER
+            line.strokeWidth = 1.6f * u * scale
+            canvas.drawPath(path, line)
+        }
+
+        fill.color = PAPER
+        canvas.drawCircle(x, hubY, 3.2f * u * scale, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.1f * u)
+        canvas.drawCircle(x, hubY, 3.2f * u * scale, line)
+    }
+
+    /** A nuclear plant: a containment dome between two cooling towers. */
+    private fun drawNuclearPlant(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        time: Float
+    ) {
+        val inkW = max(1.2f, 1.6f * u)
+        diamondPath(cx, cy, hw * 0.9f, hh * 0.9f)
+        fill.color = CONCRETE
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        dashed.color = AMBER
+        dashed.strokeWidth = 2.6f * u
+        diamondPath(cx, cy, hw * 0.77f, hh * 0.77f)
+        canvas.drawPath(path, dashed)
+
+        val leftX = cx - hw * 0.44f
+        val leftBase = cy + hh * 0.28f
+        val rightX = cx + hw * 0.46f
+        val rightBase = cy + hh * 0.02f
+        coolingTower(canvas, leftX, leftBase, 0.85f, u, inkW)
+        coolingTower(canvas, rightX, rightBase, 0.7f, u, inkW)
+
+        // containment dome
+        val domeW = hw * 0.36f
+        val domeBase = cy + hh * 0.22f
+        val domeTop = cy - hh * 0.34f
+        path.reset()
+        path.moveTo(cx - domeW, domeBase)
+        path.lineTo(cx - domeW, domeBase - 8f * u)
+        path.quadTo(cx - domeW, domeTop, cx, domeTop)
+        path.quadTo(cx + domeW, domeTop, cx + domeW, domeBase - 8f * u)
+        path.lineTo(cx + domeW, domeBase)
+        path.close()
+        fill.color = 0xFFE4EBF2.toInt()
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        line.color = 0xFFAEB7C2.toInt()
+        line.strokeWidth = max(0.7f, 1f * u)
+        path.reset()
+        for (i in -1..1) {
+            val ribX = cx + i * domeW * 0.55f
+            path.moveTo(ribX, domeTop + 6f * u)
+            path.lineTo(ribX, domeBase - 2f * u)
+        }
+        canvas.drawPath(path, line)
+
+        // reactor door
+        rect.set(
+            cx - domeW * 0.24f, domeBase - 8f * u,
+            cx + domeW * 0.24f, domeBase + 2f * u
+        )
+        fill.color = 0xFF6C7A8C.toInt()
+        canvas.drawRoundRect(rect, 2f * u, 2f * u, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1.1f * u)
+        canvas.drawRoundRect(rect, 2f * u, 2f * u, line)
+
+        // radiation sign on the forecourt
+        val sx = cx + hw * 0.02f
+        val sy = cy + hh * 0.5f
+        fill.color = AMBER
+        canvas.drawCircle(sx, sy, 4.4f * u, fill)
+        line.color = INK
+        line.strokeWidth = max(0.8f, 1f * u)
+        canvas.drawCircle(sx, sy, 4.4f * u, line)
+        fill.color = INK
+        for (i in 0 until 3) {
+            val angle = -PI.toFloat() / 2f + i * 2f * PI.toFloat() / 3f
+            canvas.drawCircle(
+                sx + cos(angle) * 2f * u,
+                sy + sin(angle) * 2f * u,
+                0.75f * u,
+                fill
+            )
+        }
+        canvas.drawCircle(sx, sy, 0.8f * u, fill)
+
+        // clean steam, not smog
+        for (i in 0 until 3) {
+            val phase = (time * 0.2f + i * 0.34f) % 1f
+            val leftTop = leftBase - 22f * u * 0.85f
+            val rightTop = rightBase - 22f * u * 0.7f
+            val r = (2.4f + phase * 2.6f) * u
+            fill.color = withAlpha(PAPER, (190 * (1f - phase)).toInt().coerceIn(0, 255))
+            canvas.drawCircle(leftX + sin((phase + i) * 4f) * 2.5f * u, leftTop - phase * 16f * u, r, fill)
+            canvas.drawCircle(rightX + sin((phase + i) * 4f) * 2.2f * u, rightTop - phase * 14f * u, r * 0.85f, fill)
+        }
+    }
+
+    private fun coolingTower(
+        canvas: Canvas,
+        x: Float,
+        baseY: Float,
+        scale: Float,
+        u: Float,
+        inkW: Float
+    ) {
+        val topY = baseY - 22f * u * scale
+        val bw = 6.5f * u * scale
+        val tw = 4.5f * u * scale
+
+        path.reset()
+        path.moveTo(x - bw, baseY)
+        path.lineTo(x - tw, topY)
+        path.lineTo(x, topY + 1.8f * u * scale)
+        path.lineTo(x, baseY + 1.2f * u * scale)
+        path.close()
+        fill.color = 0xFFC3CDD8.toInt()
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        path.reset()
+        path.moveTo(x, baseY + 1.2f * u * scale)
+        path.lineTo(x, topY + 1.8f * u * scale)
+        path.lineTo(x + tw, topY)
+        path.lineTo(x + bw, baseY)
+        path.close()
+        fill.color = 0xFF98A6B6.toInt()
+        canvas.drawPath(path, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        rect.set(x - tw, topY - 1.8f * u * scale, x + tw, topY + 1.8f * u * scale)
+        fill.color = 0xFFE4EBF2.toInt()
+        canvas.drawOval(rect, fill)
+        line.color = INK
+        line.strokeWidth = inkW
+        canvas.drawOval(rect, line)
+    }
+
     private fun drawPark(
         canvas: Canvas,
         cx: Float,
@@ -1534,6 +1839,137 @@ class CityRenderer(private val density: Float) {
         canvas.drawCircle(cx + hw * 0.24f, cy + hh * 0.02f, 1.2f * u, fill)
         fill.color = PAPER
         canvas.drawCircle(cx - hw * 0.08f, cy - hh * 0.05f, 1.1f * u + sin(time + col) * 0.2f * u, fill)
+    }
+
+    /** A 2x2 group of parks: one continuous green space instead of four plots. */
+    private fun drawLargePark(
+        canvas: Canvas,
+        tile: Tile,
+        cx: Float,
+        cy: Float,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        time: Float
+    ) {
+        val variant = (tile.originCol * 5 + tile.originRow * 3) and 3
+        val inkW = max(1.2f, 1.6f * u)
+
+        // the whole 2x2 footprint is a single lawn
+        diamondPath(cx, cy, hw, hh)
+        fill.color = 0xFF67C46A.toInt()
+        canvas.drawPath(path, fill)
+        line.color = 0xFF2E6B45.toInt()
+        line.strokeWidth = inkW
+        canvas.drawPath(path, line)
+
+        // a lighter inner lawn keeps the big shape from looking flat
+        diamondPath(cx, cy, hw * 0.88f, hh * 0.88f)
+        fill.color = 0xFF74CE72.toInt()
+        canvas.drawPath(path, fill)
+
+        // two crossing footpaths meet at a fountain in the middle
+        line.color = 0xFFFFF3D6.toInt()
+        line.strokeWidth = 4.4f * u
+        path.reset()
+        path.moveTo(cx, cy - hh * 0.94f)
+        path.lineTo(cx, cy - hh * 0.18f)
+        path.moveTo(cx, cy + hh * 0.18f)
+        path.lineTo(cx, cy + hh * 0.94f)
+        path.moveTo(cx - hw * 0.94f, cy)
+        path.lineTo(cx - hw * 0.18f, cy)
+        path.moveTo(cx + hw * 0.18f, cy)
+        path.lineTo(cx + hw * 0.94f, cy)
+        canvas.drawPath(path, line)
+        line.color = 0xFFD9C9A2.toInt()
+        line.strokeWidth = 1f * u
+        canvas.drawPath(path, line)
+
+        // pond in one quadrant, so each large park feels a little different
+        if (variant != 3) {
+            val pondX = if (variant % 2 == 0) cx + hw * 0.34f else cx - hw * 0.34f
+            val pondY = if (variant < 2) cy + hh * 0.38f else cy - hh * 0.38f
+            rect.set(
+                pondX - hw * 0.26f,
+                pondY - hh * 0.24f,
+                pondX + hw * 0.26f,
+                pondY + hh * 0.24f
+            )
+            fill.color = 0xFFB9B7A9.toInt()
+            canvas.drawOval(rect, fill)
+            rect.inset(hw * 0.05f, hh * 0.05f)
+            fill.color = WATER
+            canvas.drawOval(rect, fill)
+            line.color = WATER_EDGE
+            line.strokeWidth = max(1f, 1.2f * u)
+            canvas.drawOval(rect, line)
+            line.color = withAlpha(PAPER, 170)
+            line.strokeWidth = 1.1f * u
+            path.reset()
+            path.moveTo(pondX - hw * 0.1f, pondY - hh * 0.02f)
+            path.quadTo(
+                pondX - hw * 0.02f,
+                pondY - hh * 0.08f,
+                pondX + hw * 0.08f,
+                pondY - hh * 0.02f
+            )
+            canvas.drawPath(path, line)
+        }
+
+        // fountain
+        rect.set(cx - hw * 0.18f, cy - hh * 0.14f, cx + hw * 0.18f, cy + hh * 0.14f)
+        fill.color = 0xFFC9C5B6.toInt()
+        canvas.drawOval(rect, fill)
+        line.color = INK
+        line.strokeWidth = max(1f, 1.2f * u)
+        canvas.drawOval(rect, line)
+        rect.inset(hw * 0.045f, hh * 0.045f)
+        fill.color = WATER
+        canvas.drawOval(rect, fill)
+        line.color = WATER_EDGE
+        line.strokeWidth = 1f * u
+        canvas.drawOval(rect, line)
+        val jet = 2.4f * u + sin(time * 2.1f) * 0.35f * u
+        fill.color = withAlpha(PAPER, 235)
+        canvas.drawCircle(cx, cy - 1.5f * u, jet, fill)
+        line.color = WATER_EDGE
+        canvas.drawCircle(cx, cy - 1.5f * u, jet, line)
+        fill.color = withAlpha(WATER, 200)
+        val drip = (time * 1.4f + variant * 0.25f) % 1f
+        for (i in 0 until 3) {
+            val dx = (-0.6f + i * 0.6f) * (jet + 2.2f * u * drip)
+            canvas.drawCircle(cx + dx, cy - 2f * u + drip * 5f * u, 0.9f * u, fill)
+        }
+
+        // trees in the corners, leaving the paths and pond clear
+        val flip = if (variant % 2 == 0) 1f else -1f
+        tree(canvas, cx - hw * 0.58f * flip, cy - hh * 0.34f, 1.15f, u)
+        tree(canvas, cx + hw * 0.56f * flip, cy - hh * 0.3f, 0.95f, u)
+        tree(canvas, cx - hw * 0.62f * flip, cy + hh * 0.3f, 0.9f, u)
+        tree(canvas, cx - hw * 0.16f * flip, cy - hh * 0.58f, 0.8f, u)
+        if (variant >= 1) tree(canvas, cx + hw * 0.18f * flip, cy + hh * 0.56f, 0.85f, u)
+        if (variant == 3) tree(canvas, cx + hw * 0.64f * flip, cy + hh * 0.06f, 0.75f, u)
+
+        // benches beside the crossing paths
+        fill.color = 0xFF9A6B3F.toInt()
+        line.color = INK
+        line.strokeWidth = 0.8f * u
+        rect.set(cx + hw * 0.2f, cy - hh * 0.12f, cx + hw * 0.32f, cy - hh * 0.06f)
+        canvas.drawRect(rect, fill)
+        canvas.drawRect(rect, line)
+        rect.set(cx - hw * 0.32f, cy + hh * 0.06f, cx - hw * 0.2f, cy + hh * 0.12f)
+        canvas.drawRect(rect, fill)
+        canvas.drawRect(rect, line)
+
+        // flowers scattered over the lawn
+        fill.color = CORAL
+        canvas.drawCircle(cx + hw * 0.1f, cy + hh * 0.22f, 1.5f * u, fill)
+        fill.color = AMBER
+        canvas.drawCircle(cx - hw * 0.12f, cy + hh * 0.2f, 1.3f * u, fill)
+        fill.color = PAPER
+        canvas.drawCircle(cx + hw * 0.28f, cy + hh * 0.16f, 1.2f * u + sin(time + cx) * 0.2f * u, fill)
+        fill.color = CORAL
+        canvas.drawCircle(cx - hw * 0.25f, cy - hh * 0.16f, 1.2f * u, fill)
     }
 
     // ------------------------------------------------------------------ transit
@@ -1692,7 +2128,7 @@ class CityRenderer(private val density: Float) {
     private fun conduitHere(engine: CityEngine, col: Int, row: Int, power: Boolean): Boolean {
         val tile = engine.tile(col, row) ?: return false
         return if (power) {
-            tile.powerline || tile.zone == ZoneType.PLANT
+            tile.powerline || tile.zone.isPowerPlant
         } else {
             tile.pipe || tile.zone == ZoneType.WATERWORKS
         }

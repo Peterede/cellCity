@@ -64,6 +64,7 @@ class GameView(context: Context) : View(context) {
     private var toolbarTop = 0f
     private var mapCenterY = 0f
     private val toolRects = Array(Tool.values().size) { RectF() }
+    private val toolbarTools = Tool.values().filter { it.toolbarVisible }
     private val speedRect = RectF()
     private val newRect = RectF()
     private val goalsRect = RectF()
@@ -86,8 +87,6 @@ class GameView(context: Context) : View(context) {
     private val reportRect = RectF()
     private var bannerOpensReport = false
 
-    // a decision card pauses the city until the mayor picks an option
-    private var cardResumeSpeed = 1
     private var bankruptcyShown = false
     private val optionRects = Array(3) { RectF() }
 
@@ -209,11 +208,6 @@ class GameView(context: Context) : View(context) {
         sound.enabled = prefs.getBoolean(SOUND_KEY, true)
         banner("Welcome to Cell City!", Config.INK)
         bannerTimer = 5f
-        // a card saved mid-decision keeps the city paused until it is answered
-        if (engine.pendingDecision != null) {
-            speed = 0
-            cardResumeSpeed = 1
-        }
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -326,12 +320,11 @@ class GameView(context: Context) : View(context) {
                 }
                 is CityEvent.FireStarted -> {
                     banner(
-                        "Fire! A ${event.zone.label.lowercase()} is burning - city paused",
+                        "Fire! A ${event.zone.label.lowercase()} is burning",
                         coral,
                         event.col,
                         event.row
                     )
-                    pauseForTrouble()
                     sound.onFireStarted()
                 }
                 is CityEvent.FireOut -> {
@@ -350,15 +343,9 @@ class GameView(context: Context) : View(context) {
                 }
                 is CityEvent.CrimeReported -> {
                     banner(event.text, coral, event.col, event.row)
-                    if (event.stage >= 2) pauseForTrouble()
                     sound.onCrimeReported()
                 }
                 is CityEvent.Notice -> banner(event.text, amber)
-                is CityEvent.DecisionOffered -> {
-                    cardResumeSpeed = speed
-                    speed = 0
-                    dayTimer = 0f
-                }
                 is CityEvent.ContractComplete -> {
                     banner(
                         "Contract complete: ${event.contract.kind.title}  " +
@@ -373,7 +360,6 @@ class GameView(context: Context) : View(context) {
                 }
                 is CityEvent.Bankrupt -> {
                     banner("The city is bankrupt", coral)
-                    speed = 0
                     showBankruptcy()
                 }
                 is CityEvent.MilestoneReached -> {
@@ -404,7 +390,11 @@ class GameView(context: Context) : View(context) {
                 is CityEvent.Merged -> {
                     renderer.flashBirth(event.col, event.row)
                     banner(
-                        "Four lots became one large ${event.zone.label.lowercase()} building",
+                        if (event.zone == ZoneType.PARK) {
+                            "Four park tiles became one large park"
+                        } else {
+                            "Four lots became one large ${event.zone.label.lowercase()} building"
+                        },
                         mint
                     )
                 }
@@ -451,7 +441,7 @@ class GameView(context: Context) : View(context) {
         val gap = 5f * density
         val buttonH = 42f * density
         val columns = TOOL_COLUMNS
-        val rows = (Tool.values().size + columns - 1) / columns
+        val rows = (toolbarTools.size + columns - 1) / columns
         val hintH = 24f * density
         val bottomPad = 8f * density
         toolbarTop = h - (hintH + rows * buttonH + (rows - 1) * gap + bottomPad)
@@ -459,7 +449,7 @@ class GameView(context: Context) : View(context) {
 
         val buttonW = (w - pad * 2 - gap * (columns - 1)) / columns
         val startY = toolbarTop + hintH
-        for (i in toolRects.indices) {
+        for (i in toolbarTools.indices) {
             val col = i % columns
             val row = i / columns
             val left = pad + col * (buttonW + gap)
@@ -1122,7 +1112,7 @@ class GameView(context: Context) : View(context) {
 
     // ------------------------------------------------------------------ decisions
 
-    /** The decision card sits above every sheet and pauses the city behind it. */
+    /** The decision card sits above every sheet and waits for the mayor's choice. */
     private fun drawDecisionCard(canvas: Canvas, w: Float, h: Float) {
         val card = engine.pendingDecision ?: return
         fill.color = 0xB014263B.toInt()
@@ -2209,15 +2199,18 @@ class GameView(context: Context) : View(context) {
             textBold.textAlign = Paint.Align.LEFT
         }
 
-        for (i in Tool.values().indices) {
-            drawToolButton(canvas, Tool.values()[i], toolRects[i])
+        for (i in toolbarTools.indices) {
+            drawToolButton(canvas, toolbarTools[i], toolRects[i])
         }
     }
 
     private fun drawToolButton(canvas: Canvas, tool: Tool, r: RectF) {
-        val selectedNow = tool == selected
+        // the PLANT button carries whichever plant type the picker last chose
+        val plantTool = tool == Tool.PLANT && selected.zone.isPowerPlant
+        val shown = if (plantTool) selected else tool
+        val selectedNow = tool == selected || plantTool
         val unlocked = engine.isUnlocked(tool)
-        val cost = engine.baseCost(tool)
+        val cost = engine.baseCost(shown)
         val affordable = cost <= engine.funds || tool == Tool.BULLDOZE || tool == Tool.PAN
         val radius = 9f * density
 
@@ -2248,8 +2241,8 @@ class GameView(context: Context) : View(context) {
         textBold.textAlign = Paint.Align.CENTER
         val label = when {
             !unlocked -> "LOCKED"
-            cost > 0 -> "${tool.label} ${costLabel(cost)}"
-            else -> tool.label
+            cost > 0 -> "${shown.label} ${costLabel(cost)}"
+            else -> shown.label
         }
         canvas.drawText(
             fitText(label, textBold, r.width() - 8f * density),
@@ -2606,7 +2599,7 @@ class GameView(context: Context) : View(context) {
                 fill.color = 0xFF8FE08A.toInt()
                 canvas.drawCircle(cx - s * 0.2f, cy - s * 0.35f, s * 0.16f, fill)
             }
-            Tool.PLANT -> {
+            Tool.PLANT, Tool.SOLAR, Tool.WIND, Tool.NUCLEAR -> {
                 stroke.color = color
                 path.reset()
                 path.moveTo(cx - s * 0.55f, cy + s * 0.6f)
@@ -2926,10 +2919,10 @@ class GameView(context: Context) : View(context) {
         if (engine.zoneCount == 0 && selected != Tool.RESIDENTIAL) {
             return "Roads down. Now zone RES beside them"
         }
-        if (engine.plantCount == 0 && selected == Tool.PLANT) {
+        if (engine.plantCount == 0 && selected.zone.isPowerPlant) {
             return "Place the plant beside a road so power can flow"
         }
-        if (engine.plantCount == 0 && selected != Tool.PLANT) {
+        if (engine.plantCount == 0 && !selected.zone.isPowerPlant) {
             return "Homes need power - add a PLANT next to the road"
         }
         if (engine.waterCount == 0 && engine.zoneCount > 0) {
@@ -2974,6 +2967,9 @@ class GameView(context: Context) : View(context) {
             Tool.PAN -> "Drag to pan - pinch to zoom"
             Tool.BULLDOZE -> "Tap a tile to clear it (and its main) - 25% refund"
             Tool.PLANT -> "PLANT $2500 - powers connected roads"
+            Tool.SOLAR -> "SOLAR $1600 - clean power for 30 tiles"
+            Tool.WIND -> "WIND $2200 - clean power for 45 tiles"
+            Tool.NUCLEAR -> "NUKE $9000 - 180 tiles, very little smog"
             Tool.ROAD -> "ROAD $15 - bridges cost $90 over water"
             Tool.HIGHWAY -> "HWY $120 - four lanes: faster traffic, more trade; $300 over water"
             Tool.POWERLINE -> "WIRE $10 - buried cable carries power across open ground"
@@ -2983,7 +2979,7 @@ class GameView(context: Context) : View(context) {
             Tool.RESIDENTIAL -> "RES $40 - homes fill up, then upgrade"
             Tool.COMMERCIAL -> "COM $50 - shops need residents nearby"
             Tool.INDUSTRIAL -> "IND $60 - jobs and taxes, but pollution"
-            Tool.PARK -> "PARK $100 - makes citizens happier"
+            Tool.PARK -> "PARK $100 - happier citizens; four make one large park"
             Tool.WATER -> "WATER $500 - pipes water to lots within 6 tiles"
             Tool.PIPE -> "PIPE $12 - mains go under roads and buildings; $70 under the river"
             Tool.STATION -> "STATION $700 - place it beside rail to spread transit access"
@@ -3150,11 +3146,16 @@ class GameView(context: Context) : View(context) {
                     return true
                 }
                 if (y >= toolbarTop) {
-                    for (i in toolRects.indices) {
+                    for (i in toolbarTools.indices) {
                         if (toolRects[i].contains(x, y)) {
-                            val tool = Tool.values()[i]
+                            val tool = toolbarTools[i]
                             if (!engine.isUnlocked(tool)) {
                                 banner("${tool.label} unlocks later - see GOALS", coral)
+                                performClick()
+                                return true
+                            }
+                            if (tool == Tool.PLANT) {
+                                choosePlantType()
                                 performClick()
                                 return true
                             }
@@ -3385,12 +3386,6 @@ class GameView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun pauseForTrouble() {
-        if (speed == 0) return
-        speed = 0
-        dayTimer = 0f
-    }
-
     private fun cycleSpeed() {
         speed = (speed + 1) % 4
         dayTimer = 0f
@@ -3402,8 +3397,6 @@ class GameView(context: Context) : View(context) {
         val card = engine.pendingDecision ?: return
         if (card.options.size <= index) return
         val message = engine.resolveDecision(index)
-        speed = cardResumeSpeed.coerceAtLeast(1)
-        dayTimer = 0f
         advisorReport = CityAdvisor.report(engine)
         banner(message ?: card.options[index].label, mint)
         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -3415,7 +3408,6 @@ class GameView(context: Context) : View(context) {
     private fun showBankruptcy() {
         if (bankruptcyShown) return
         bankruptcyShown = true
-        speed = 0
         AlertDialog.Builder(context, android.R.style.Theme_Material_Light_Dialog_Alert)
             .setTitle("The city is bankrupt")
             .setMessage(
@@ -3427,7 +3419,6 @@ class GameView(context: Context) : View(context) {
             .setPositiveButton("Emergency loan") { _, _ ->
                 engine.acceptBailout()
                 bankruptcyShown = false
-                speed = 1
                 advisorReport = CityAdvisor.report(engine)
                 banner("Emergency loan accepted - the city has a second chance", amber)
                 saveCity()
@@ -3633,8 +3624,8 @@ class GameView(context: Context) : View(context) {
                 lastHaptic = now
             }
             when {
-                selected == Tool.PLANT && engine.plantCount == 1 ->
-                    banner("Power plant online - watch the flow along roads", mint)
+                selected.zone.isPowerPlant && engine.plantCount == 1 ->
+                    banner("${selected.zone.label} online - watch the flow along roads", mint)
                 selected == Tool.WATER && engine.waterCount == 1 ->
                     banner("Water tower online - nearby lots now have water", Config.SKY_BLUE)
                 selected == Tool.PIPE && engine.pipeCount == 1 ->
@@ -3659,6 +3650,31 @@ class GameView(context: Context) : View(context) {
                 }
             }
         }
+    }
+
+    /** The single PLANT toolbar button: pick which kind of power station to build. */
+    private fun choosePlantType() {
+        val types = Tool.values().filter { it.zone.isPowerPlant }
+        val labels = types.map { type ->
+            val smog = when (type.zone) {
+                ZoneType.NUCLEAR -> "trace smog"
+                ZoneType.PLANT -> "some smog"
+                else -> "no smog"
+            }
+            "${type.zone.label} - ${costLabel(engine.baseCost(type))}, " +
+                "${engine.powerCapacity(type.zone)} tiles, $smog"
+        }.toTypedArray()
+        AlertDialog.Builder(context, android.R.style.Theme_Material_Light_Dialog_Alert)
+            .setTitle("Power plant type")
+            .setItems(labels) { _, which ->
+                selected = types[which]
+                clearInspect()
+                lastPaintCol = -1
+                lastPaintRow = -1
+                invalidate()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun confirmNewCity() {
@@ -3713,7 +3729,6 @@ class GameView(context: Context) : View(context) {
         reportOpen = false
         awardsOpen = false
         bankruptcyShown = false
-        cardResumeSpeed = 1
         advisorReport = CityAdvisor.report(engine)
         renderer.focusOn(engine.cols / 2, engine.rows / 2)
         clampCamera()

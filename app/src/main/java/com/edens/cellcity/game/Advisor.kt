@@ -109,7 +109,7 @@ object CityAdvisor {
             issues.add(
                 CityIssue(
                     if (blackouts > developed / 2) "Half the city has no power" else "Blackouts",
-                    "$blackouts building(s) are off the grid - add a PLANT or run cables.",
+                    "$blackouts building(s) are off the grid - add a power plant or run cables.",
                     if (blackouts > developed / 2) IssueLevel.CRITICAL else IssueLevel.WARNING
                 )
             )

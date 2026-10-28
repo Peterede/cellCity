@@ -27,7 +27,10 @@ enum class ZoneType {
     STATION,
     HIGHWAY,
     /** Appended last so that zone ordinals in older saves keep their meaning. */
-    SUBWAY_STATION;
+    SUBWAY_STATION,
+    SOLAR,
+    WIND,
+    NUCLEAR;
 
     val isZone: Boolean
         get() = this == RESIDENTIAL || this == COMMERCIAL || this == INDUSTRIAL
@@ -39,9 +42,13 @@ enum class ZoneType {
     val isRoad: Boolean
         get() = this == ROAD || this == HIGHWAY
 
+    /** Anything that feeds the grid: gas, solar, wind or nuclear. */
+    val isPowerPlant: Boolean
+        get() = this == PLANT || this == SOLAR || this == WIND || this == NUCLEAR
+
     /** Utilities and emergency services: paid for, but nobody lives in them. */
     val isService: Boolean
-        get() = this == PLANT || this == WATERWORKS || this == POLICE ||
+        get() = isPowerPlant || this == WATERWORKS || this == POLICE ||
             this == FIRE || this == HOSPITAL || this == STATION || this == SUBWAY_STATION
 
     /** Structures that always occupy a full 2x2 block. */
@@ -57,6 +64,9 @@ enum class ZoneType {
             INDUSTRIAL -> "Industrial"
             PARK -> "Park"
             PLANT -> "Power plant"
+            SOLAR -> "Solar farm"
+            WIND -> "Wind farm"
+            NUCLEAR -> "Nuclear plant"
             RAIL -> "Rail line"
             WATERWORKS -> "Water tower"
             POLICE -> "Police station"
@@ -85,6 +95,9 @@ enum class Tool(val zone: ZoneType, val label: String) {
     INDUSTRIAL(ZoneType.INDUSTRIAL, "IND"),
     PARK(ZoneType.PARK, "PARK"),
     PLANT(ZoneType.PLANT, "PLANT"),
+    SOLAR(ZoneType.SOLAR, "SOLAR"),
+    WIND(ZoneType.WIND, "WIND"),
+    NUCLEAR(ZoneType.NUCLEAR, "NUKE"),
     WATER(ZoneType.WATERWORKS, "WATER"),
     /** Underground mains and cables are layers on top of whatever occupies the tile. */
     PIPE(ZoneType.NONE, "PIPE"),
@@ -111,6 +124,10 @@ enum class Tool(val zone: ZoneType, val label: String) {
     /** Civic buildings and the info tool act on one tile per tap. */
     val singlePlacement: Boolean
         get() = zone.isService || zone.isMultiTile || this == INFO
+
+    /** Plant types are chosen from the PLANT picker, not separate toolbar buttons. */
+    val toolbarVisible: Boolean
+        get() = this != SOLAR && this != WIND && this != NUCLEAR
 }
 
 /**
@@ -283,6 +300,9 @@ enum class Milestone(
             Tool.INDUSTRIAL,
             Tool.PARK,
             Tool.PLANT,
+            Tool.SOLAR,
+            Tool.WIND,
+            Tool.NUCLEAR,
             Tool.WATER,
             Tool.PIPE,
             Tool.POWERLINE,

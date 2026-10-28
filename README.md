@@ -22,7 +22,10 @@ You start with **$15,000** and a 24×24 island split by a river.
 | Commercial zone | $50 | Shops create jobs for residents |
 | Industrial zone | $60 | More jobs and taxes, but pollution |
 | Park | $100 | Boosts happiness |
-| Power plant | $2,500 | Powers up to 55 connected road/building tiles |
+| Power plant | $2,500 | Gas plant: powers up to 55 connected tiles, adds smog |
+| Solar farm | $1,600 | 30 tiles of clean power |
+| Wind farm | $2,200 | 45 tiles of clean power |
+| Nuclear plant | $9,000 | 180 tiles of baseload power with only trace smog |
 | Water tower | $500 | Pipes water to every built tile within 6 tiles |
 | Water pipe | $12 | Buried main: runs under roads, zones and buildings; $70 under the river |
 | Power cable | $10 | Buried cable: carries the grid across open ground; $50 under the river |
@@ -35,7 +38,7 @@ You start with **$15,000** and a 24×24 island split by a river.
 | Bulldoze | free | Clears a tile or a whole 2x2 block and refunds 25% |
 | Pan | free | One-finger camera drag (pinch works any time) |
 
-Tap once to build a tile, or drag to paint roads, rail, zones and canals in a line. **FILL** works the other way: drag out a rectangle and release to raise the whole patch. Utilities, services and airports always snap to a single tap. Zones display an **R / C / I** marker until a building grows, plus badges for a missing road (red **!**), power (amber **bolt**) and water (blue **droplet**).
+Tap once to build a tile, or drag to paint roads, rail, zones and canals in a line. **FILL** works the other way: drag out a rectangle and release to raise the whole patch. Utilities, services and airports always snap to a single tap. The **PLANT** button opens a picker for gas, solar, wind or nuclear plants, then shows the chosen type and its price. Zones display an **R / C / I** marker until a building grows, plus badges for a missing road (red **!**), power (amber **bolt**) and water (blue **droplet**).
 
 ### Utilities, layers and transit
 
@@ -68,6 +71,7 @@ Canal or natural, water is worth money to the tax roll: every lot with open wate
 
 - An **airport** is a single 2x2 landmark: it needs four clear tiles, at least one of them beside a road, and is charged once. Bulldozing any of its tiles removes the whole airport for one refund.
 - Four developed lots of the **same zone** that all reach level 2 merge into one large building. The merged block levels up as a single structure and every lot gains 35% extra capacity; the city block is drawn as one wide building across all four tiles.
+- Four **park** tiles in a 2x2 block group into one large park as soon as the last one is placed. It is drawn as a single green space with paths, a fountain and a pond, and every tile still counts toward park coverage, contracts and the Green Belt award. Bulldozing any of its tiles removes the whole park for one refund.
 
 ### Simulation
 

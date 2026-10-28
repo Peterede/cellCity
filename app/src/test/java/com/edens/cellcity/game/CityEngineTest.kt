@@ -370,6 +370,66 @@ class CityEngineTest {
     }
 
     @Test
+    fun solarWindAndNuclearPlantsBuildAndSurviveASave() {
+        val e = city()
+        val (c, r) = findDryRun(e, 3) ?: error("no dry run")
+        assertEquals(BuildResult.OK, e.build(Tool.SOLAR, c, r))
+        assertEquals(BuildResult.OK, e.build(Tool.WIND, c + 1, r))
+        assertEquals(BuildResult.OK, e.build(Tool.NUCLEAR, c + 2, r))
+
+        assertEquals(ZoneType.SOLAR, e.tile(c, r)!!.zone)
+        assertEquals(ZoneType.WIND, e.tile(c + 1, r)!!.zone)
+        assertEquals(ZoneType.NUCLEAR, e.tile(c + 2, r)!!.zone)
+        assertEquals("every plant type counts as a plant", 3, e.plantCount)
+        assertEquals(1, e.solarCount)
+        assertEquals(1, e.windCount)
+        assertEquals(1, e.nuclearCount)
+        assertTrue(
+            "clean plants carry less load than the gas plant",
+            e.powerCapacity(ZoneType.SOLAR) < e.powerCapacity(ZoneType.PLANT)
+        )
+        assertTrue(
+            "nuclear is the biggest plant",
+            e.powerCapacity(ZoneType.NUCLEAR) > e.powerCapacity(ZoneType.WIND)
+        )
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull("new plant types survive a save", loaded)
+        assertEquals(ZoneType.SOLAR, loaded!!.tile(c, r)!!.zone)
+        assertEquals(ZoneType.WIND, loaded.tile(c + 1, r)!!.zone)
+        assertEquals(ZoneType.NUCLEAR, loaded.tile(c + 2, r)!!.zone)
+    }
+
+    @Test
+    fun aSolarFarmEnergisesItsRoadNetwork() {
+        val e = city(7)
+        assertEquals(BuildResult.OK, e.build(Tool.SOLAR, 10, 10))
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 10, 11))
+        assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
+        assertTrue("the solar farm feeds the grid", e.tile(10, 11)!!.powered)
+        assertTrue("a road-connected lot is powered", e.tile(11, 11)!!.powered)
+    }
+
+    @Test
+    fun solarAndWindAreCleanWhileGasAndNuclearAreNot() {
+        val coal = city(11)
+        val solar = city(11)
+        val nuclear = city(11)
+        val (c, r) = findDryRun(coal, 1) ?: error("no dry land")
+
+        assertEquals(BuildResult.OK, coal.build(Tool.PLANT, c, r))
+        assertEquals(BuildResult.OK, solar.build(Tool.SOLAR, c, r))
+        assertEquals(BuildResult.OK, nuclear.build(Tool.NUCLEAR, c, r))
+        coal.tick()
+        solar.tick()
+        nuclear.tick()
+
+        assertEquals(Config.POLLUTION_PLANT, coal.pollution, 0.0001f)
+        assertEquals("solar adds no smog", 0f, solar.pollution, 0.0001f)
+        assertEquals(Config.POLLUTION_NUCLEAR, nuclear.pollution, 0.0001f)
+    }
+
+    @Test
     fun zonesWithoutWaterStayVacant() {
         val e = city(7)
         assertEquals(BuildResult.OK, e.build(Tool.PLANT, 10, 10))
@@ -491,6 +551,54 @@ class CityEngineTest {
         assertNotNull("merged blocks survive a save", loaded)
         assertTrue(loaded!!.tile(10, 11)!!.merged)
         assertEquals(10, loaded.tile(10, 11)!!.originCol)
+    }
+
+    @Test
+    fun fourParksGroupIntoOneLargePark() {
+        val e = city()
+        val (c, r) = findDryBlock(e, 2, 2) ?: error("no dry 2x2 block")
+        for (rr in r..r + 1) {
+            for (cc in c..c + 1) {
+                assertEquals(BuildResult.OK, e.build(Tool.PARK, cc, rr))
+            }
+        }
+
+        val origin = e.tile(c, r)!!
+        assertTrue("adjacent parks group immediately", origin.merged)
+        assertEquals(c, origin.originCol)
+        assertEquals(r, origin.originRow)
+        assertEquals("every park tile still counts", 4, e.parkCount)
+        assertEquals("a park block is not a building block", 0, e.mergedBlockCount)
+        assertEquals("Large park", e.tileState(origin))
+        assertEquals(ZoneType.PARK, e.tile(c + 1, r + 1)!!.zone)
+        assertTrue(e.tile(c + 1, r + 1)!!.merged)
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull("large parks survive a save", loaded)
+        assertTrue(loaded!!.tile(c + 1, r + 1)!!.merged)
+        assertEquals(c, loaded.tile(c + 1, r + 1)!!.originCol)
+    }
+
+    @Test
+    fun undoBreaksUpALargePark() {
+        val e = city()
+        val (c, r) = findDryBlock(e, 2, 2) ?: error("no dry 2x2 block")
+        for (rr in r..r + 1) {
+            for (cc in c..c + 1) {
+                e.beginAction()
+                assertEquals(BuildResult.OK, e.build(Tool.PARK, cc, rr))
+                e.endAction()
+            }
+        }
+        assertTrue("the four parks grouped", e.tile(c, r)!!.merged)
+
+        assertEquals("build", e.undo())
+        assertEquals("only the undone park is gone", 3, e.parkCount)
+        for (rr in r..r + 1) {
+            for (cc in c..c + 1) {
+                assertFalse("the rest of the group is unmerged again", e.tile(cc, rr)!!.merged)
+            }
+        }
     }
 
     @Test

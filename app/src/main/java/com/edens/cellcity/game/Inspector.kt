@@ -200,7 +200,10 @@ object CityInspector {
                         }
                     }
 
-                    ZoneType.PLANT -> {
+                    ZoneType.PLANT,
+                    ZoneType.SOLAR,
+                    ZoneType.WIND,
+                    ZoneType.NUCLEAR -> {
                         val touchRoad = roadNext || around.any { it.powerline } || t.powerline
                         needs.add(
                             TileNeed(
@@ -209,12 +212,15 @@ object CityInspector {
                                 if (touchRoad) "connected" else "none"
                             )
                         )
-                        facts.add(TileFact("Capacity", "${Config.PLANT_POWER} tiles"))
+                        facts.add(TileFact("Capacity", "${engine.powerCapacity(t.zone)} tiles"))
                         broken = !touchRoad
-                        advice = if (touchRoad) {
-                            "Power flows along roads, buildings, parks and buried cables."
-                        } else {
-                            "A plant needs a road or cable to send power anywhere."
+                        advice = when {
+                            !touchRoad -> "A plant needs a road or cable to send power anywhere."
+                            t.zone == ZoneType.SOLAR || t.zone == ZoneType.WIND ->
+                                "Clean power - it flows along roads, buildings, parks and buried cables."
+                            t.zone == ZoneType.NUCLEAR ->
+                                "Low-smog baseload power flows along roads, buildings, parks and cables."
+                            else -> "Power flows along roads, buildings, parks and buried cables."
                         }
                     }
 

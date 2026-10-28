@@ -175,7 +175,12 @@ class CityEngine(
     val subwayCount: Int get() = countTiles { it.subway }
     val subwayStationCount: Int get() = countTiles { it.zone == ZoneType.SUBWAY_STATION }
     val parkCount: Int get() = countTiles { it.zone == ZoneType.PARK }
-    val plantCount: Int get() = countTiles { it.zone == ZoneType.PLANT }
+    /** Every power plant, whatever its fuel. */
+    val plantCount: Int get() = countTiles { it.zone.isPowerPlant }
+    val fossilPlantCount: Int get() = countTiles { it.zone == ZoneType.PLANT }
+    val solarCount: Int get() = countTiles { it.zone == ZoneType.SOLAR }
+    val windCount: Int get() = countTiles { it.zone == ZoneType.WIND }
+    val nuclearCount: Int get() = countTiles { it.zone == ZoneType.NUCLEAR }
     val waterCount: Int get() = countTiles { it.zone == ZoneType.WATERWORKS }
     val pipeCount: Int get() = countTiles { it.pipe }
     val powerlineCount: Int get() = countTiles { it.powerline }
@@ -520,6 +525,9 @@ class CityEngine(
         Tool.INDUSTRIAL -> Config.COST_INDUSTRIAL
         Tool.PARK -> Config.COST_PARK
         Tool.PLANT -> Config.COST_PLANT
+        Tool.SOLAR -> Config.COST_SOLAR
+        Tool.WIND -> Config.COST_WIND
+        Tool.NUCLEAR -> Config.COST_NUCLEAR
         Tool.WATER -> Config.COST_WATERWORKS
         Tool.PIPE -> Config.COST_PIPE
         Tool.POWERLINE -> Config.COST_POWERLINE
@@ -895,6 +903,7 @@ class CityEngine(
         if (t.terrain == Terrain.FOREST) t.terrain = Terrain.GRASS
         if (tool == Tool.PARK || tool == Tool.PLANT || tool.zone.isService) t.level = 1
         events.add(CityEvent.Built(t.zone, col, row))
+        if (tool == Tool.PARK) mergeParkBlock(col, row)
         accrueActionCost(fundsBefore)
         refreshInfrastructure()
         return BuildResult.OK
@@ -1002,6 +1011,8 @@ class CityEngine(
         val entry = undoStack.removeLastOrNull() ?: return null
         for ((index, state) in entry.tiles) {
             val t = grid[index / cols][index % cols]
+            // undo can break a large park apart again
+            if (t.merged && t.originCol >= 0 && t.originRow >= 0) unmergeBlock(t)
             t.terrain = state.terrain
             t.zone = state.zone
             t.level = state.level
@@ -1072,6 +1083,9 @@ class CityEngine(
         ZoneType.INDUSTRIAL -> Config.COST_INDUSTRIAL
         ZoneType.PARK -> Config.COST_PARK
         ZoneType.PLANT -> Config.COST_PLANT
+        ZoneType.SOLAR -> Config.COST_SOLAR
+        ZoneType.WIND -> Config.COST_WIND
+        ZoneType.NUCLEAR -> Config.COST_NUCLEAR
         ZoneType.WATERWORKS -> Config.COST_WATERWORKS
         ZoneType.POLICE -> Config.COST_POLICE
         ZoneType.FIRE -> Config.COST_FIRE
@@ -1190,25 +1204,34 @@ class CityEngine(
         return false
     }
 
+    /** How many tiles one plant of this type can energise, or 0 if it is not a plant. */
+    fun powerCapacity(zone: ZoneType): Int = when (zone) {
+        ZoneType.PLANT -> Config.PLANT_POWER
+        ZoneType.SOLAR -> Config.POWER_SOLAR
+        ZoneType.WIND -> Config.POWER_WIND
+        ZoneType.NUCLEAR -> Config.POWER_NUCLEAR
+        else -> 0
+    }
+
     /**
      * Power flows from every plant through roads, parks and buildings until the
-     * plant's capacity runs out. Empty grass and water stop the flow, so a
-     * disconnected district really does go dark.
+     * plants' combined capacity runs out. Empty grass and water stop the flow, so
+     * a disconnected district really does go dark.
      */
     private fun updatePower() {
         val reached = Array(rows) { BooleanArray(cols) }
         val queue = ArrayDeque<Int>()
-        var plants = 0
+        var budget = 0
         for (r in 0 until rows) {
             for (c in 0 until cols) {
-                if (grid[r][c].zone == ZoneType.PLANT) {
+                val zone = grid[r][c].zone
+                if (zone.isPowerPlant) {
                     reached[r][c] = true
                     queue.addLast(r * cols + c)
-                    plants++
+                    budget += powerCapacity(zone)
                 }
             }
         }
-        val budget = plants * Config.PLANT_POWER
         var used = 0
         while (queue.isNotEmpty() && used < budget) {
             val idx = queue.removeFirst()
@@ -1466,12 +1489,14 @@ class CityEngine(
     }
 
     private fun updatePollution() {
-        val plants = plantCount
+        val plants = fossilPlantCount
+        val nuclear = nuclearCount
         val industry = countTiles { it.zone == ZoneType.INDUSTRIAL && it.level > 0 }
         val parks = parkCount
         val roads = roadCount
         pollution = clamp(
-            plants * 0.15f +
+            plants * Config.POLLUTION_PLANT +
+                nuclear * Config.POLLUTION_NUCLEAR +
                 industry * 0.045f +
                 roads * 0.0015f +
                 highwayCount * 0.004f +
@@ -1666,8 +1691,35 @@ class CityEngine(
     }
 
     /**
+     * Four park tiles join into one large park as soon as they fill a 2x2
+     * block around the tile that was just built.
+     */
+    private fun mergeParkBlock(col: Int, row: Int) {
+        for (r in max(0, row - 1)..min(rows - 2, row)) {
+            for (c in max(0, col - 1)..min(cols - 2, col)) {
+                val a = grid[r][c]
+                val b = grid[r][c + 1]
+                val d = grid[r + 1][c]
+                val e = grid[r + 1][c + 1]
+                if (a.zone != ZoneType.PARK || b.zone != ZoneType.PARK) continue
+                if (d.zone != ZoneType.PARK || e.zone != ZoneType.PARK) continue
+                if (a.merged || b.merged || d.merged || e.merged) continue
+                if (a.level < 1 || b.level < 1 || d.level < 1 || e.level < 1) continue
+                for (t in arrayOf(a, b, d, e)) {
+                    t.merged = true
+                    t.originCol = c
+                    t.originRow = r
+                    t.maturity = 0
+                }
+                events.add(CityEvent.Merged(ZoneType.PARK, c, r))
+            }
+        }
+    }
+
+    /**
      * Four neighbouring developed lots of the same zone become one large
-     * building once every lot has matured to the merge level.
+     * building once every lot has matured to the merge level. Four park tiles
+     * group into one large park as soon as they form a 2x2 block.
      */
     private fun updateMerges() {
         for (r in 0 until rows - 1) {
@@ -1677,12 +1729,18 @@ class CityEngine(
                 val d = grid[r + 1][c]
                 val e = grid[r + 1][c + 1]
                 val zone = a.zone
-                if (!zone.isZone) continue
+                val park = zone == ZoneType.PARK
+                if (!zone.isZone && !park) continue
                 if (b.zone != zone || d.zone != zone || e.zone != zone) continue
                 if (a.merged || b.merged || d.merged || e.merged) continue
-                if (a.level < Config.MERGE_LEVEL || b.level < Config.MERGE_LEVEL) continue
-                if (d.level < Config.MERGE_LEVEL || e.level < Config.MERGE_LEVEL) continue
-                if (!ready(a) || !ready(b) || !ready(d) || !ready(e)) continue
+                if (park) {
+                    // parks are complete the moment they are placed
+                    if (a.level < 1 || b.level < 1 || d.level < 1 || e.level < 1) continue
+                } else {
+                    if (a.level < Config.MERGE_LEVEL || b.level < Config.MERGE_LEVEL) continue
+                    if (d.level < Config.MERGE_LEVEL || e.level < Config.MERGE_LEVEL) continue
+                    if (!ready(a) || !ready(b) || !ready(d) || !ready(e)) continue
+                }
 
                 // the four lots level up together from now on, so start even
                 val level = maxOf(a.level, b.level, d.level, e.level)
@@ -1890,7 +1948,10 @@ class CityEngine(
                 subwayCount * Config.UPKEEP_SUBWAY +
                 subwayStationCount * Config.UPKEEP_SUBWAY_STATION +
                 parkCount * Config.UPKEEP_PARK +
-                plantCount * Config.UPKEEP_PLANT +
+                fossilPlantCount * Config.UPKEEP_PLANT +
+                solarCount * Config.UPKEEP_SOLAR +
+                windCount * Config.UPKEEP_WIND +
+                nuclearCount * Config.UPKEEP_NUCLEAR +
                 waterCount * Config.UPKEEP_WATERWORKS +
                 policeCount * Config.UPKEEP_POLICE +
                 fireCount * Config.UPKEEP_FIRE +
@@ -2085,6 +2146,9 @@ class CityEngine(
             ZoneType.RAIL -> Config.UPKEEP_RAIL
             ZoneType.PARK -> Config.UPKEEP_PARK
             ZoneType.PLANT -> Config.UPKEEP_PLANT
+            ZoneType.SOLAR -> Config.UPKEEP_SOLAR
+            ZoneType.WIND -> Config.UPKEEP_WIND
+            ZoneType.NUCLEAR -> Config.UPKEEP_NUCLEAR
             ZoneType.WATERWORKS -> Config.UPKEEP_WATERWORKS
             ZoneType.POLICE -> Config.UPKEEP_POLICE
             ZoneType.FIRE -> Config.UPKEEP_FIRE
@@ -2106,6 +2170,7 @@ class CityEngine(
     fun tileState(t: Tile): String = when {
         t.terrain == Terrain.WATER && t.zone.isRoad -> "Bridge"
         t.terrain == Terrain.WATER -> "Water"
+        t.merged && t.zone == ZoneType.PARK -> "Large park"
         t.merged && t.zone.isZone -> "${t.zone.label} block (L${t.level})"
         t.developed -> "${t.zone.label} L${t.level} · ${t.population + t.jobs} inside"
         t.zone.isZone -> "Vacant ${t.zone.label.lowercase()}"

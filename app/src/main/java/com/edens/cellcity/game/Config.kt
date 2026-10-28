@@ -42,6 +42,9 @@ object Config {
     const val COST_INDUSTRIAL = 60
     const val COST_PARK = 100
     const val COST_PLANT = 2500
+    const val COST_SOLAR = 1600
+    const val COST_WIND = 2200
+    const val COST_NUCLEAR = 9000
     const val COST_WATERWORKS = 500
     const val COST_POLICE = 900
     const val COST_FIRE = 800
@@ -69,6 +72,9 @@ object Config {
     const val UPKEEP_SUBWAY_STATION = 1.10f
     const val UPKEEP_PARK = 0.40f
     const val UPKEEP_PLANT = 3.00f
+    const val UPKEEP_SOLAR = 0.90f
+    const val UPKEEP_WIND = 1.30f
+    const val UPKEEP_NUCLEAR = 7.50f
     const val UPKEEP_WATERWORKS = 1.20f
     const val UPKEEP_POLICE = 1.60f
     const val UPKEEP_FIRE = 1.40f
@@ -92,6 +98,12 @@ object Config {
 
     /** Tiles that one power plant can energise (breadth-first through roads). */
     const val PLANT_POWER = 55
+    const val POWER_SOLAR = 30
+    const val POWER_WIND = 45
+    const val POWER_NUCLEAR = 180
+    /** Smog each plant type adds; solar and wind are clean, nuclear is nearly so. */
+    const val POLLUTION_PLANT = 0.15f
+    const val POLLUTION_NUCLEAR = 0.02f
 
     // --- services ----------------------------------------------------------
     /** Manhattan radius a water tower pipes water to. */
