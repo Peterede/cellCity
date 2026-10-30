@@ -11,18 +11,24 @@ import kotlin.random.Random
  * exercised from plain JVM unit tests and serialised into SharedPreferences.
  */
 class CityEngine(
-    val cols: Int = Config.COLS,
-    val rows: Int = Config.ROWS,
+    cols: Int = Config.COLS,
+    rows: Int = Config.ROWS,
     seed: Long = 20261020L,
     private val enforceUnlocks: Boolean = true,
     difficultyLevel: Difficulty = Difficulty.NORMAL,
     mapStyleLevel: MapStyle = MapStyle.RIVERLANDS
 ) {
+    /** The map can grow after founding; see [expand]. Existing tiles keep their cells. */
+    var cols: Int = cols
+        private set
+    var rows: Int = rows
+        private set
+
     private val seedValue: Long = seed
     private val rng = Random(seed)
     /** Separate stream for cards and contracts, so the map's own rolls stay stable. */
     private val eventRng = Random(seed + 7_919L)
-    private val grid: Array<Array<Tile>> = Array(rows) { Array(cols) { Tile() } }
+    private var grid: Array<Array<Tile>> = Array(rows) { Array(cols) { Tile() } }
     private val events = ArrayList<CityEvent>()
 
     var difficulty: Difficulty = difficultyLevel
@@ -91,6 +97,19 @@ class CityEngine(
 
     /** Closing snapshot of every month so far, oldest first: the city's record. */
     val history: List<CityRecord> get() = records
+
+    // --- neighbourhoods and festivals --------------------------------------
+    /** Named districts, rebuilt from what is standing each day. */
+    var areas: List<CityArea> = emptyList()
+        private set
+
+    /** Today's feast, if any. Derived from the date, so it never needs saving. */
+    var festival: Festival? = null
+        private set
+
+    /** Player-given district names and themes, keyed by the block they occupy. */
+    private val areaNames = HashMap<String, String>()
+    private val areaThemes = HashMap<String, AreaStyle>()
 
     // --- decisions, contracts and stakes -----------------------------------
     /** Days until the next decision card is drawn. */
@@ -538,6 +557,7 @@ class CityEngine(
         Tool.RECLAIM -> Config.COST_RECLAIM
         Tool.CANAL -> Config.COST_CANAL
         Tool.BULLDOZE, Tool.PAN, Tool.INFO -> 0
+        Tool.EXPAND -> expansionCost
     }
 
     fun costOf(tool: Tool, col: Int, row: Int): Int {
@@ -557,7 +577,7 @@ class CityEngine(
     }
 
     fun canBuild(tool: Tool, col: Int, row: Int): BuildResult {
-        if (tool == Tool.PAN || tool == Tool.INFO) return BuildResult.OK
+        if (tool == Tool.PAN || tool == Tool.INFO || tool == Tool.EXPAND) return BuildResult.OK
         if (!inBounds(col, row)) return BuildResult.OUT_OF_BOUNDS
         val t = grid[row][col]
         if (tool == Tool.BULLDOZE) return BuildResult.OK
@@ -825,6 +845,14 @@ class CityEngine(
         val check = canBuild(tool, col, row)
         if (check != BuildResult.OK) return check
         if (tool == Tool.PAN || tool == Tool.INFO) return BuildResult.OK
+        if (tool == Tool.EXPAND) {
+            return when {
+                !canExpand -> BuildResult.CANNOT
+                funds < expansionCost -> BuildResult.NO_FUNDS
+                expand() -> BuildResult.OK
+                else -> BuildResult.CANNOT
+            }
+        }
         if (!inBounds(col, row)) return BuildResult.OUT_OF_BOUNDS
 
         val fundsBefore = funds
@@ -1145,6 +1173,8 @@ class CityEngine(
         updateOccupancy()
         updateMerges()
         updateDisasters()
+        updateAreas()
+        updateFestival()
         updateHappiness()
         updateEconomy()
         updateProgression()
@@ -1514,6 +1544,12 @@ class CityEngine(
         val comCap = capacityTotal(ZoneType.COMMERCIAL)
         val indCap = capacityTotal(ZoneType.INDUSTRIAL)
         val housingFill = population.toFloat() / max(1, housingCap).toFloat()
+        // A commercial or industrial slot is one job for one resident, so both trade
+        // meters are measured against the same pool of workers. Counting each zone
+        // type on its own let "more shops than customers" and "too few jobs" be true
+        // at the same time, which froze the city: homes waited on jobs that the flat
+        // meters never allowed anyone to zone.
+        val jobSlots = comCap + indCap
 
         demandR = clamp(
             Config.DEMAND_BASE_R -
@@ -1530,14 +1566,14 @@ class CityEngine(
         demandC = clamp(
             Config.DEMAND_BASE_C -
                 activeCrime * 0.008f +
-                (population * 0.20f - comCap * 0.85f) / 45f +
+                (population - jobSlots) / 45f +
                 airportCount * 0.30f +
                 highwayCount * 0.03f,
             -1f,
             1f
         )
         demandI = clamp(
-            Config.DEMAND_BASE_I + (population * 0.14f + jobs * 0.15f - indCap * 0.85f) / 55f +
+            Config.DEMAND_BASE_I + (population - jobSlots) / 55f +
                 highwayCount * 0.02f,
             -1f,
             1f
@@ -1896,6 +1932,251 @@ class CityEngine(
         }
     }
 
+    // ------------------------------------------------- neighbourhoods & feasts
+
+    /**
+     * Buys one more column east and one more row south. Existing tiles keep
+     * their coordinates, so every road, zone and building stays exactly where
+     * the player put it and the city simply reaches further out.
+     */
+    fun expand(): Boolean {
+        if (!canExpand) return false
+        val price = expansionCost
+        if (funds < price) return false
+        val newCols = min(Config.MAX_COLS, cols + 1)
+        val newRows = min(Config.MAX_ROWS, rows + 1)
+        if (newCols == cols && newRows == rows) return false
+        funds -= price
+        grid = Array(newRows) { r ->
+            Array(newCols) { c ->
+                if (r < rows && c < cols) {
+                    grid[r][c]
+                } else {
+                    Tile().apply {
+                        terrain = if (rng.nextFloat() < 0.15f) Terrain.FOREST else Terrain.GRASS
+                    }
+                }
+            }
+        }
+        cols = newCols
+        rows = newRows
+        refreshInfrastructure()
+        updateDemand()
+        updateAreas()
+        return true
+    }
+
+    /** The price of the next ring of land; 0 once the map is at its limit. */
+    val expansionCost: Int
+        get() = if (!canExpand) 0 else Config.COST_EXPAND + cols * rows * Config.COST_EXPAND_PER_TILE
+
+    val canExpand: Boolean
+        get() = cols < Config.MAX_COLS || rows < Config.MAX_ROWS
+
+    /**
+     * Rebuilds the neighbourhoods from the zoned blocks themselves: homes and
+     * shops belong to the same district when they are at most [Config.AREA_GAP]
+     * tiles apart, which makes a block around one street, and stops at water.
+     * Zoned lots persist, so a district keeps its name while its buildings churn.
+     */
+    private fun updateAreas() {
+        val total = cols * rows
+        val claimed = BooleanArray(total)
+        val found = ArrayList<CityArea>()
+        val tally = HashMap<String, Int>()
+        for (start in 0 until total) {
+            if (claimed[start]) continue
+            if (!isNeighbourhoodLot(grid[start / cols][start % cols])) continue
+
+            val tiles = ArrayList<Int>()
+            val reach = IntArray(total) { -1 }
+            val queue = ArrayList<Int>()
+            claimed[start] = true
+            tiles.add(start)
+            reach[start] = Config.AREA_GAP
+            queue.add(start)
+            var head = 0
+            while (head < queue.size) {
+                val idx = queue[head++]
+                val depth = reach[idx]
+                val c = idx % cols
+                val r = idx / cols
+                for (d in 0 until 4) {
+                    val nc = c + DC[d]
+                    val nr = r + DR[d]
+                    if (!inBounds(nc, nr)) continue
+                    val next = nr * cols + nc
+                    val t = grid[nr][nc]
+                    if (t.terrain == Terrain.WATER) continue
+                    if (isNeighbourhoodLot(t)) {
+                        if (!claimed[next]) {
+                            claimed[next] = true
+                            tiles.add(next)
+                            reach[next] = Config.AREA_GAP
+                            queue.add(next)
+                        }
+                    } else if (depth > 1 && reach[next] < depth - 1) {
+                        // streets and open ground can be crossed, but only briefly
+                        reach[next] = depth - 1
+                        queue.add(next)
+                    }
+                }
+            }
+            if (tiles.size < Config.AREA_MIN_LOTS) continue
+            tiles.sort()
+            var pop = 0
+            var work = 0
+            var shops = 0
+            var sumCol = 0
+            var sumRow = 0
+            for (idx in tiles) {
+                val t = grid[idx / cols][idx % cols]
+                pop += t.population
+                work += t.jobs
+                if (t.zone == ZoneType.COMMERCIAL) shops += t.jobs
+                sumCol += idx % cols
+                sumRow += idx / cols
+            }
+            val centreCol = sumCol / tiles.size
+            val centreRow = sumRow / tiles.size
+            val key = areaKey(centreCol, centreRow)
+            val style = areaThemes[key] ?: AreaStyle.values()[styleFor(centreCol, centreRow)]
+            val custom = areaNames[key]
+            val count = (tally[style.label] ?: 0) + 1
+            tally[style.label] = count
+            val name = custom ?: if (count == 1) {
+                style.label
+            } else {
+                "${style.label} ${ROMAN_SUFFIX[count - 1]}"
+            }
+            found.add(
+                CityArea(
+                    style = style,
+                    name = name,
+                    tiles = tiles,
+                    col = centreCol,
+                    row = centreRow,
+                    population = pop,
+                    jobs = work,
+                    comJobs = shops,
+                    landmarks = landmarksNear(centreCol, centreRow)
+                )
+            )
+        }
+        areas = found.sortedWith(compareBy({ it.style.ordinal }, { it.tiles.first() }))
+    }
+
+    /** Districts are keyed by the block of the map they sit on, not by their tiles. */
+    private fun areaKey(col: Int, row: Int): String = "${col / 4}:${row / 4}"
+
+    /** Parks and transit inside or beside a district make it a destination. */
+    private fun landmarksNear(col: Int, row: Int): Int {
+        var found = 0
+        for (r in row - Config.AREA_LANDMARK_RANGE..row + Config.AREA_LANDMARK_RANGE) {
+            for (c in col - Config.AREA_LANDMARK_RANGE..col + Config.AREA_LANDMARK_RANGE) {
+                val t = tile(c, r) ?: continue
+                if (t.zone == ZoneType.PARK || t.zone == ZoneType.STATION ||
+                    t.zone == ZoneType.SUBWAY_STATION || t.zone == ZoneType.AIRPORT
+                ) {
+                    found++
+                }
+            }
+        }
+        return min(3, found)
+    }
+
+    /**
+     * Renames or re-themes a district the player picked. The change belongs to
+     * the block, survives a save, and is reapplied whenever districts rebuild.
+     */
+    fun relabelArea(area: CityArea, name: String?, style: AreaStyle?): Boolean {
+        val key = areaKey(area.col, area.row)
+        if (name != null) {
+            val clean = name.trim()
+                .filter { it != '|' && it != ';' && it != ',' }
+                .take(Config.AREA_NAME_MAX)
+            if (clean.isEmpty()) areaNames.remove(key) else areaNames[key] = clean
+        }
+        if (style != null) areaThemes[key] = style
+        updateAreas()
+        return true
+    }
+
+    /** Homes and shops make a neighbourhood; factories and services do not. */
+    private fun isNeighbourhoodLot(t: Tile): Boolean =
+        t.zone == ZoneType.RESIDENTIAL || t.zone == ZoneType.COMMERCIAL
+
+    /**
+     * The same corner of the map always gets the same flavour, so the district's
+     * name does not change as buildings come and go.
+     */
+    private fun styleFor(col: Int, row: Int): Int {
+        val hash = seedValue * 31 + (col / 4) * 17L + (row / 4) * 7L
+        val count = AreaStyle.values().size
+        return (((hash % count) + count) % count).toInt()
+    }
+
+    /** The neighbourhood this cell belongs to, if any. */
+    fun areaAt(col: Int, row: Int): CityArea? {
+        if (!inBounds(col, row)) return null
+        val idx = row * cols + col
+        return areas.firstOrNull { it.tiles.contains(idx) }
+    }
+
+    /** Announced once when a feast starts and once when it ends. */
+    private fun updateFestival() {
+        val previous = festival
+        val next = festivalFor(month, day)
+        festival = next
+        if (next != null && next.name != previous?.name) {
+            events.add(
+                CityEvent.FestivalStarted(next.name, next.blurb, next.col, next.row, next.bulls)
+            )
+        } else if (next == null && previous != null) {
+            events.add(CityEvent.FestivalEnded(previous.name))
+        }
+        if (next != null && next.bulls && eventRng.nextFloat() < Config.BULLS_INCIDENT_CHANCE) {
+            events.add(CityEvent.Notice(INCIDENTS[eventRng.nextInt(INCIDENTS.size)]))
+        }
+    }
+
+    /**
+     * The feast the calendar says is on today. Neighbourhoods keep the first days
+     * of their own month; the running of the bulls belongs to the whole city and
+     * needs a population big enough to fill the streets.
+     */
+    private fun festivalFor(month: Int, day: Int): Festival? {
+        val biggest = areas.maxByOrNull { it.tiles.size } ?: return null
+        if (month == Config.BULLS_MONTH &&
+            day in Config.BULLS_FIRST_DAY..Config.BULLS_LAST_DAY &&
+            population >= Config.BULLS_MIN_POPULATION
+        ) {
+            return Festival(
+                name = "Running of the Bulls",
+                blurb = "white shirts, red scarves and very fast hooves",
+                col = biggest.col,
+                row = biggest.row,
+                lots = biggest.tiles.count { grid[it / cols][it % cols].developed },
+                areaName = biggest.name,
+                citywide = true,
+                bulls = true
+            )
+        }
+        if (day > Config.FESTIVAL_DAYS) return null
+        val host = areas.filter { it.style.festivalMonth == month }
+            .maxByOrNull { it.tiles.size } ?: return null
+        return Festival(
+            name = host.style.festivalName,
+            blurb = host.style.festivalBlurb,
+            col = host.col,
+            row = host.row,
+            lots = host.tiles.count { grid[it / cols][it % cols].developed },
+            areaName = host.name,
+            citywide = false,
+            bulls = false
+        )
+    }
+
     private fun updateHappiness() {
         var developed = 0
         var supplied = 0
@@ -1921,6 +2202,9 @@ class CityEngine(
             policeCoverage * 5f +
             fireCoverage * 4f +
             healthCoverage * 5f +
+            min(9f, areas.size * Config.NEIGHBOURHOOD_HAPPINESS) +
+            min(6f, areas.count { it.landmarks > 0 } * Config.AREA_LANDMARK_MOOD) +
+            if (festival != null) Config.FESTIVAL_HAPPINESS else 0f +
             min(4f, railCount * 0.2f) +
             min(6f, subwayStationCount * 1.6f) -
             pollution * 45f -
@@ -1934,8 +2218,27 @@ class CityEngine(
     /** Citizens pay a share of their income set by [taxRate]; 10% is the baseline. */
     private fun taxMultiplier(): Float = taxRate / Config.TAX_DEFAULT.toFloat()
 
-    private fun dailyIncome(): Float =
-        (population * Config.TAX_PER_RESIDENT + jobs * Config.TAX_PER_JOB) * taxMultiplier()
+    /** What residents and workers pay, before festival takings and district trade. */
+    val taxIncomePerDay: Float
+        get() = (population * Config.TAX_PER_RESIDENT + jobs * Config.TAX_PER_JOB) *
+            taxMultiplier() + areaTradePerDay
+
+    /**
+     * Shops trading inside a named district earn more than the same shops on an
+     * anonymous strip: the district is what makes them worth visiting.
+     */
+    val areaTradePerDay: Float
+        get() = areas.sumOf { it.comJobs } *
+            (Config.TAX_PER_JOB * Config.AREA_TRADE_BONUS) * taxMultiplier()
+
+    private fun dailyIncome(): Float = taxIncomePerDay + festivalTakings()
+
+    /** Visitors spend while the feast is on, and the city takes its share. */
+    private fun festivalTakings(): Float {
+        val f = festival ?: return 0f
+        if (f.citywide) return population * Config.BULLS_TAX_PER_RESIDENT
+        return f.lots * Config.FESTIVAL_TAX_PER_LOT
+    }
 
     private fun dailyExpenses(): Float {
         val upkeep =
@@ -2215,7 +2518,7 @@ class CityEngine(
 
     fun save(): String {
         val sb = StringBuilder(4096)
-        sb.append("CC11|")
+        sb.append("CC13|")
         sb.append(funds).append('|')
         sb.append(day).append('|')
         sb.append(month).append('|')
@@ -2271,6 +2574,14 @@ class CityEngine(
         sb.append(String.format(java.util.Locale.US, "%.2f", pollutionOffset))
         sb.append('|').append(pendingDecision?.kind?.name ?: "")
         sb.append('|').append(mapStyle.ordinal)
+        sb.append('|').append(cols)
+        sb.append('|').append(rows)
+        val relabelled = (areaNames.keys + areaThemes.keys).toSortedSet()
+        sb.append('|').append(
+            relabelled.joinToString(";") { key ->
+                "$key,${areaNames[key] ?: ""},${areaThemes[key]?.ordinal ?: -1}"
+            }
+        )
         return sb.toString()
     }
 
@@ -2289,8 +2600,16 @@ class CityEngine(
         private val SAVE_VERSIONS =
             setOf(
                 "CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7", "CC8", "CC9", "CC10",
-                "CC11"
+                "CC11", "CC12", "CC13"
             )
+        private val ROMAN_SUFFIX = arrayOf("II", "III", "IV", "V", "VI", "VII", "VIII")
+        private val INCIDENTS = arrayOf(
+            "A runner was gored on the last corner - he is fine, and will tell the story " +
+                "for years",
+            "A bull broke through a café barrier; the owner starts charging admission",
+            "Nobody caught the last bull. It is asleep in the park fountain",
+            "A tourist tried to outrun the herd in flip-flops. The herd won, politely"
+        )
         private val SCORE_MEDALS = intArrayOf(750, 2_000, 4_500, 9_000)
 
         fun load(data: String?): CityEngine? {
@@ -2302,7 +2621,9 @@ class CityEngine(
             val mergedSaves = version != "CC1"
             val layeredPipes = version != "CC1" && version != "CC2"
             val layeredWires = version != "CC1" && version != "CC2" && version != "CC3"
-            val reclaimedSaves = version == "CC11"
+            val namedSaves = version == "CC13"
+            val expandedSaves = version == "CC12" || namedSaves
+            val reclaimedSaves = version == "CC11" || expandedSaves
             val progressive = version == "CC5" || version == "CC6" ||
                 version == "CC7" || version == "CC8" || version == "CC9" ||
                 version == "CC10" || reclaimedSaves
@@ -2315,6 +2636,8 @@ class CityEngine(
             val historySaves = version == "CC8" || fullSaves
             val expectedParts = when {
                 !tunnelled -> 11
+                namedSaves -> 27
+                expandedSaves -> 26
                 mapSaves -> 24
                 fullSaves -> 22
                 historySaves -> 13
@@ -2322,8 +2645,17 @@ class CityEngine(
             }
             if (progressive && parts.size != expectedParts) return null
             return try {
-                val w = Config.COLS
-                val h = Config.ROWS
+                // CC12 stores the map size, because cities can buy more land
+                val w = if (expandedSaves) {
+                    parts[24].toIntOrNull()?.takeIf { it in 8..64 } ?: return null
+                } else {
+                    Config.COLS
+                }
+                val h = if (expandedSaves) {
+                    parts[25].toIntOrNull()?.takeIf { it in 8..64 } ?: return null
+                } else {
+                    Config.ROWS
+                }
                 val engine = CityEngine(w, h, parts[7].toLongOrNull() ?: 1L)
                 // Pre-progression saves never had locked tools; keep them all open.
                 engine.legacyUnlockedAll = !progressive
@@ -2394,6 +2726,17 @@ class CityEngine(
                     }
                     engine.mapStyle = MapStyle.values()
                         .getOrNull(parts[23].toIntOrNull() ?: -1) ?: return null
+                }
+                if (namedSaves && parts[26].isNotEmpty()) {
+                    for (chunk in parts[26].split(';')) {
+                        if (chunk.isEmpty()) continue
+                        val f = chunk.split(',')
+                        if (f.size < 3) continue
+                        val key = f[0]
+                        if (f[1].isNotEmpty()) engine.areaNames[key] = f[1]
+                        val ordinal = f[2].toIntOrNull() ?: -1
+                        AreaStyle.values().getOrNull(ordinal)?.let { engine.areaThemes[key] = it }
+                    }
                 }
                 if (progressive) {
                     if (parts[8].isNotEmpty()) {
@@ -2468,6 +2811,7 @@ class CityEngine(
                 engine.jobs = job
                 engine.refreshInfrastructure()
                 engine.updateDemand()
+                engine.updateAreas()
                 engine
             } catch (e: Exception) {
                 null

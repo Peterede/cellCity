@@ -112,18 +112,21 @@ enum class Tool(val zone: ZoneType, val label: String) {
     BULLDOZE(ZoneType.NONE, "DOZE"),
     PAN(ZoneType.NONE, "PAN"),
     /** Read-only tool: tapping a cell explains what it needs. */
-    INFO(ZoneType.NONE, "INFO");
+    INFO(ZoneType.NONE, "INFO"),
+
+    /** Buys a ring of new land around the city. Not a cell: it grows the map. */
+    EXPAND(ZoneType.NONE, "GROW");
 
     /** True for tools that bury a layer instead of occupying the tile. */
     val isLayer: Boolean
         get() = this == PIPE || this == POWERLINE || this == SUBWAY
 
     val buildsZones: Boolean
-        get() = this != PAN && this != BULLDOZE
+        get() = this != PAN && this != BULLDOZE && this != EXPAND
 
     /** Civic buildings and the info tool act on one tile per tap. */
     val singlePlacement: Boolean
-        get() = zone.isService || zone.isMultiTile || this == INFO
+        get() = zone.isService || zone.isMultiTile || this == INFO || this == EXPAND
 
     /** Plant types are chosen from the PLANT picker, not separate toolbar buttons. */
     val toolbarVisible: Boolean
@@ -310,7 +313,8 @@ enum class Milestone(
             Tool.CANAL,
             Tool.BULLDOZE,
             Tool.PAN,
-            Tool.INFO
+            Tool.INFO,
+            Tool.EXPAND
         )
     }
 }
@@ -356,6 +360,17 @@ sealed class CityEvent {
     ) : CityEvent()
 
     data class Notice(val text: String) : CityEvent()
+
+    /** A neighbourhood feast or the bulls has begun; the banner can jump there. */
+    data class FestivalStarted(
+        val name: String,
+        val blurb: String,
+        val col: Int,
+        val row: Int,
+        val bulls: Boolean
+    ) : CityEvent()
+
+    data class FestivalEnded(val name: String) : CityEvent()
     data class DecisionOffered(val decision: PendingDecision) : CityEvent()
     data class ContractComplete(val contract: Contract) : CityEvent()
     data class ContractExpired(val contract: Contract) : CityEvent()
@@ -441,8 +456,91 @@ data class Contract(
     val kind: ContractKind,
     val target: Int,
     val deadlineDay: Int,
-    val reward: Int,
-    val offeredDay: Int
+    val reward: Int,        val offeredDay: Int
+)
+
+/**
+ * The flavour a cluster of developed lots takes on once enough of them grow up
+ * together. Nobody builds this: it grows out of the neighbourhood itself, and
+ * each style keeps its own feast day in the city calendar.
+ */
+enum class AreaStyle(
+    val label: String,
+    val blurb: String,
+    val accent: Int,
+    val festivalName: String,
+    val festivalBlurb: String,
+    /** Month (1..12) of the neighbourhood's own feast. */
+    val festivalMonth: Int
+) {
+    LITTLE_ITALY(
+        "Little Italy",
+        "cafés, bakeries and long Sunday lunches",
+        Config.CORAL,
+        "Feast of San Gennaro",
+        "sausage carts, string lights and a procession down the main street",
+        9
+    ),
+    CHINATOWN(
+        "Chinatown",
+        "markets, lanterns and rooftop fireworks",
+        Config.AMBER,
+        "Lunar New Year",
+        "lions dance between the shops and the whole block smells of dumplings",
+        2
+    ),
+    LITTLE_HAVANA(
+        "Little Havana",
+        "cigars, dominoes and music after dark",
+        Config.MINT,
+        "Carnaval",
+        "drums, costumes and a conga line that closes the street",
+        7
+    ),
+    LITTLE_INDIA(
+        "Little India",
+        "spice stalls and gold-lit shopfronts",
+        Config.BRASS,
+        "Diwali",
+        "oil lamps on every sill and sweets handed out all evening",
+        11
+    ),
+    LITTLE_SPAIN(
+        "Little Spain",
+        "tapas bars and tiled courtyards",
+        Config.SKY_BLUE,
+        "Feria de Abril",
+        "striped tents, sherry and dancing until the small hours",
+        4
+    )
+}
+
+/** One neighbourhood: a named cluster of zoned homes and shops, rebuilt as the city grows. */
+data class CityArea(
+    val style: AreaStyle,
+    val name: String,
+    /** Tile indices (row * cols + col), ascending. */
+    val tiles: List<Int>,
+    val col: Int,
+    val row: Int,
+    val population: Int,
+    val jobs: Int,
+    /** Commercial jobs inside the district: the ones that trade a little harder. */
+    val comJobs: Int = 0,
+    /** Parks and transit within reach, 0..3: what makes the district a destination. */
+    val landmarks: Int = 0
+)
+
+/** A feast that is running today. Calendar-driven, so it is never saved. */
+data class Festival(
+    val name: String,
+    val blurb: String,
+    val col: Int,
+    val row: Int,
+    val lots: Int,
+    val areaName: String?,
+    val citywide: Boolean,
+    val bulls: Boolean
 )
 
 /** The shape of the land a new city is founded on. */

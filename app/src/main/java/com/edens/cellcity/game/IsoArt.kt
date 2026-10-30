@@ -8,6 +8,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
@@ -67,6 +68,11 @@ class CityRenderer(private val density: Float) {
         strokeCap = Paint.Cap.ROUND
     }
     private val zoneText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
         isFakeBoldText = true
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -228,6 +234,24 @@ class CityRenderer(private val density: Float) {
     fun focusOn(col: Int, row: Int) {
         camera.panX = -(col - row) * camera.tileW * 0.5f * camera.zoom
         camera.panY = -(col + row) * camera.tileH * 0.5f * camera.zoom
+    }
+
+    /** The district sign under a screen point, if the player touched one. */
+    fun areaLabelAt(x: Float, y: Float, engine: CityEngine): CityArea? {
+        val u = density * camera.zoom
+        val hh = camera.tileH * 0.5f * camera.zoom
+        labelPaint.textSize = 9f * u
+        val padX = 5f * u
+        val padY = 4f * u
+        for (area in engine.areas) {
+            val cx = camera.screenX(area.col.toFloat(), area.row.toFloat())
+            val cy = camera.screenY(area.col.toFloat(), area.row.toFloat()) - hh * 2.6f
+            val half = labelPaint.measureText(area.name) / 2f + padX
+            if (x >= cx - half && x <= cx + half && y >= cy - padY && y <= cy + padY) {
+                return area
+            }
+        }
+        return null
     }
 
     // ------------------------------------------------------------------ traffic
@@ -408,6 +432,7 @@ class CityRenderer(private val density: Float) {
 
         if (overlay != CoverageOverlay.NONE) drawCoverage(canvas, engine, overlay, u, time)
 
+        drawNeighbourhoods(canvas, engine, u, time)
         drawCars(canvas, u)
         drawTrains(canvas, u)
         drawHover(canvas, engine, tool, hoverCol, hoverRow, hoverValid, u)
@@ -3134,6 +3159,175 @@ class CityRenderer(private val density: Float) {
         canvas.drawPath(path, line)
         line.color = if (valid) PAPER else CORAL
         line.strokeWidth = 2.2f * u
+        canvas.drawPath(path, line)
+    }
+
+    // ------------------------------------------------- neighbourhoods & feasts
+
+    /**
+     * Names the districts, strings bunting over the celebrating one and, during
+     * the running of the bulls, sends a herd down the host neighbourhood's streets.
+     */
+    private fun drawNeighbourhoods(canvas: Canvas, engine: CityEngine, u: Float, time: Float) {
+        val festival = engine.festival
+        val hw = camera.tileW * 0.5f * camera.zoom
+        val hh = camera.tileH * 0.5f * camera.zoom
+        for (area in engine.areas) {
+            if (festival != null && (festival.citywide || festival.areaName == area.name)) {
+                drawBunting(canvas, engine, area, hw, hh, u, time, festival.bulls)
+            }
+            val cx = camera.screenX(area.col.toFloat(), area.row.toFloat())
+            val cy = camera.screenY(area.col.toFloat(), area.row.toFloat()) - hh * 2.6f
+            if (cx < -90f || cx > viewW + 90f) continue
+            if (cy < -40f || cy > viewH + 40f) continue
+            drawAreaLabel(canvas, area, cx, cy, u)
+        }
+        if (festival != null && festival.bulls) {
+            drawBullRun(canvas, engine, festival, u, time)
+        }
+    }
+
+    /** A little district sign hung above the middle of a neighbourhood. */
+    private fun drawAreaLabel(canvas: Canvas, area: CityArea, cx: Float, cy: Float, u: Float) {
+        labelPaint.textSize = 9f * u
+        labelPaint.color = INK
+        val textWidth = labelPaint.measureText(area.name)
+        val padX = 5f * u
+        val padY = 4f * u
+        rect.set(cx - textWidth / 2f - padX, cy - padY, cx + textWidth / 2f + padX, cy + padY)
+        fill.color = withAlpha(area.style.accent, 236)
+        canvas.drawRoundRect(rect, padY, padY, fill)
+        line.color = withAlpha(INK, 195)
+        line.strokeWidth = max(1f, 1.1f * u)
+        canvas.drawRoundRect(rect, padY, padY, line)
+        canvas.drawText(area.name, cx, cy + 3.2f * u, labelPaint)
+    }
+
+    /** Strings of flags over the terraces while the neighbourhood is celebrating. */
+    private fun drawBunting(
+        canvas: Canvas,
+        engine: CityEngine,
+        area: CityArea,
+        hw: Float,
+        hh: Float,
+        u: Float,
+        time: Float,
+        bulls: Boolean
+    ) {
+        val colors = if (bulls) {
+            intArrayOf(CREAM, Config.CORAL)
+        } else {
+            intArrayOf(AMBER, Config.CORAL, Config.MINT, Config.SKY_BLUE)
+        }
+        for ((i, idx) in area.tiles.withIndex()) {
+            if (i % 2 != 0) continue
+            val col = idx % engine.cols
+            val row = idx / engine.cols
+            val tile = engine.tile(col, row) ?: continue
+            if (!tile.developed) continue
+            val cx = camera.screenX(col.toFloat(), row.toFloat())
+            val cy = camera.screenY(col.toFloat(), row.toFloat())
+            val swing = sin(time * 2.2f + i * 0.7f) * 1.1f * u
+            val ropeY = cy - hh * 2.05f + swing
+
+            line.color = withAlpha(INK, 165)
+            line.strokeWidth = max(1f, 0.9f * u)
+            path.reset()
+            path.moveTo(cx - hw * 0.6f, ropeY - hh * 0.12f)
+            path.quadTo(cx, ropeY + hh * 0.2f, cx + hw * 0.6f, ropeY - hh * 0.12f)
+            canvas.drawPath(path, line)
+
+            for (f in 0 until 4) {
+                val fx = cx - hw * 0.45f + f * hw * 0.3f
+                val droop = 1f - (abs(f - 1.5f) / 1.5f)
+                val fy = ropeY + hh * 0.04f + hh * 0.1f * droop
+                fill.color = colors[(i + f) % colors.size]
+                path.reset()
+                path.moveTo(fx - 2f * u, fy)
+                path.lineTo(fx + 2f * u, fy)
+                path.lineTo(fx, fy + 3.4f * u)
+                path.close()
+                canvas.drawPath(path, fill)
+            }
+        }
+    }
+
+    /** The herd, plus a handful of runners in white and red, on the host streets. */
+    private fun drawBullRun(
+        canvas: Canvas,
+        engine: CityEngine,
+        festival: Festival,
+        u: Float,
+        time: Float
+    ) {
+        val streets = ArrayList<Int>()
+        for (r in 0 until engine.rows) {
+            for (c in 0 until engine.cols) {
+                if (engine.tile(c, r)?.zone?.isRoad == true) streets.add(r * engine.cols + c)
+            }
+        }
+        if (streets.isEmpty()) return
+        val near = streets.filter {
+            abs(it % engine.cols - festival.col) + abs(it / engine.cols - festival.row) <= 7
+        }
+        val route = if (near.size >= 4) near else streets
+        for (i in 0 until min(4, route.size)) {
+            val a = route[(i * 5 + (time * 0.4f).toInt()) % route.size]
+            val b = route[(a * 7 + 3) % route.size]
+            if (a == b) continue
+            val phase = (time * 0.55f + i * 0.37f) % 1f
+            val sweep = 1f - abs(phase * 2f - 1f)
+            val ac = (a % engine.cols).toFloat()
+            val ar = (a / engine.cols).toFloat()
+            val bc = (b % engine.cols).toFloat()
+            val br = (b / engine.cols).toFloat()
+            val x = camera.screenX(ac + (bc - ac) * sweep, ar + (br - ar) * sweep)
+            val y = camera.screenY(ac + (bc - ac) * sweep, ar + (br - ar) * sweep)
+            if (x < -30f || x > viewW + 30f || y < -30f || y > viewH + 30f) continue
+            if (i == 0) bull(canvas, x, y, u) else runner(canvas, x, y, u, i)
+        }
+    }
+
+    /** A little bull: dark body, pale horns, kicking legs. */
+    private fun bull(canvas: Canvas, x: Float, y: Float, u: Float) {
+        fill.color = 0xFF3B3230.toInt()
+        canvas.drawOval(x - 4.6f * u, y - 2.6f * u, x + 4.6f * u, y + 1.8f * u, fill)
+        fill.color = 0xFF574B45.toInt()
+        canvas.drawCircle(x + 5.2f * u, y - 1.6f * u, 2.3f * u, fill)
+        line.color = 0xFFEDE6D2.toInt()
+        line.strokeWidth = 1.3f * u
+        path.reset()
+        path.moveTo(x + 5.6f * u, y - 3.2f * u)
+        path.lineTo(x + 8.2f * u, y - 4.4f * u)
+        path.moveTo(x + 4.2f * u, y - 3.4f * u)
+        path.lineTo(x + 2.6f * u, y - 4.8f * u)
+        canvas.drawPath(path, line)
+        line.color = 0xFF2A2320.toInt()
+        line.strokeWidth = 1.4f * u
+        path.reset()
+        path.moveTo(x - 3.4f * u, y + 1.6f * u)
+        path.lineTo(x - 4.4f * u, y + 4.2f * u)
+        path.moveTo(x + 2.6f * u, y + 1.6f * u)
+        path.lineTo(x + 3.6f * u, y + 4.2f * u)
+        canvas.drawPath(path, line)
+    }
+
+    /** A runner in white with the red scarf of the fiesta. */
+    private fun runner(canvas: Canvas, x: Float, y: Float, u: Float, seed: Int) {
+        val sway = if (seed % 2 == 0) 1f else -1f
+        fill.color = CREAM
+        canvas.drawOval(x - 1.8f * u, y - 0.6f * u, x + 1.8f * u, y + 2.8f * u, fill)
+        canvas.drawCircle(x, y - 2.4f * u, 1.5f * u, fill)
+        fill.color = Config.CORAL
+        rect.set(x - 1.8f * u, y - 1.3f * u, x + 1.8f * u, y - 0.3f * u)
+        canvas.drawRect(rect, fill)
+        line.color = INK
+        line.strokeWidth = max(1f, 0.9f * u)
+        path.reset()
+        path.moveTo(x - 1.1f * u, y + 2.6f * u)
+        path.lineTo(x - 2.4f * u * sway, y + 4.8f * u)
+        path.moveTo(x + 1.1f * u, y + 2.6f * u)
+        path.lineTo(x + 2.4f * u * sway, y + 4.8f * u)
         canvas.drawPath(path, line)
     }
 

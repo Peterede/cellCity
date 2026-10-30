@@ -324,7 +324,7 @@ class CityEngineTest {
         val (c, r) = findShoreWater(e)
         assertEquals(BuildResult.OK, e.build(Tool.RECLAIM, c, r))
         assertTrue(e.tile(c, r)!!.reclaimed)
-        assertTrue(e.save().startsWith("CC11|"))
+        assertTrue(e.save().startsWith("CC13|"))
 
         val loaded = CityEngine.load(e.save())
         assertNotNull(loaded)
@@ -333,7 +333,8 @@ class CityEngineTest {
 
         val older = e.save().split('|').toMutableList()
         older[0] = "CC10"
-        val old = CityEngine.load(older.joinToString("|"))
+        // CC10 predates the map size fields at the end of the save
+        val old = CityEngine.load(older.subList(0, 24).joinToString("|"))
         assertNotNull("the previous save version still loads", old)
         assertEquals(Terrain.GRASS, old!!.tile(c, r)!!.terrain)
         assertFalse("older saves have no reclaimed ground", old.tile(c, r)!!.reclaimed)
@@ -952,7 +953,7 @@ class CityEngineTest {
         val e = city(51)
         repeat(Config.DAYS_PER_MONTH) { e.tick() }
         val parts = e.save().split('|')
-        assertEquals(24, parts.size)
+        assertEquals(27, parts.size)
         val cc9Parts = parts.subList(0, 22).toMutableList()
         cc9Parts[0] = "CC9"
 
@@ -1050,7 +1051,7 @@ class CityEngineTest {
         assertEquals(BuildResult.OK, e.build(Tool.RESIDENTIAL, 11, 11))
         repeat(Config.DAYS_PER_MONTH * 3) { e.tick() }
         assertTrue(e.history.size >= 3)
-        assertTrue(e.save().startsWith("CC11|"))
+        assertTrue(e.save().startsWith("CC13|"))
 
         val loaded = CityEngine.load(e.save())
         assertNotNull(loaded)
@@ -1699,7 +1700,7 @@ class CityEngineTest {
     fun fireAndCrimeSurviveASave() {
         val e = city(19)
         val parts = e.save().split('|')
-        assertEquals("CC11", parts[0])
+        assertEquals("CC13", parts[0])
 
         // graft a fire and a crime mark onto the first tile
         val tiles = parts[12].split(';').toMutableList()
@@ -1735,7 +1736,7 @@ class CityEngineTest {
 
         // strip the CC6-only fields: the tax rate before the tiles
         val parts = e.save().split('|')
-        assertEquals("CC11", parts[0])
+        assertEquals("CC13", parts[0])
         val cc5 = (listOf("CC5") + parts.subList(1, 10) + listOf(parts[12])).joinToString("|")
 
         val loaded = CityEngine.load(cc5)
@@ -1762,26 +1763,41 @@ class CityEngineTest {
     @Test
     fun taxRateScalesIncomeAndSoursTheMood() {
         val e = city(61)
+        val calm = city(61)
         buildBasicTown(e)
-        repeat(400) { e.tick() }
+        buildBasicTown(calm)
+        repeat(400) {
+            e.tick()
+            calm.tick()
+        }
         assertTrue("people live here", e.population > 0)
         assertEquals(Config.TAX_DEFAULT, e.taxRate)
-        val defaultIncome = e.incomePerDay
-        assertTrue(defaultIncome > 0f)
+        val defaultIncome = e.taxIncomePerDay
+        assertTrue("residents pay tax", defaultIncome > 0f)
 
-        assertTrue(e.setTaxRate(20))
-        assertEquals(20, e.taxRate)
-        assertEquals("doubling the rate doubles the tax take", defaultIncome * 2f, e.incomePerDay, defaultIncome * 0.02f)
+        assertTrue(e.setTaxRate(Config.TAX_MAX))
+        assertEquals(Config.TAX_MAX, e.taxRate)
+        assertEquals(
+            "the top rate takes 2.5 times the tax",
+            defaultIncome * 2.5f,
+            e.taxIncomePerDay,
+            defaultIncome * 0.03f
+        )
 
-        val before = e.happiness
-        repeat(150) { e.tick() }
-        assertTrue("higher taxes hurt happiness", e.happiness < before)
+        repeat(150) {
+            e.tick()
+            calm.tick()
+        }
+        assertTrue(
+            "higher taxes hurt happiness (${e.happiness} vs ${calm.happiness})",
+            e.happiness < calm.happiness
+        )
 
         e.setTaxRate(999)
         assertEquals(Config.TAX_MAX, e.taxRate)
         e.setTaxRate(-5)
         assertEquals(Config.TAX_MIN, e.taxRate)
-        assertEquals("no tax means no tax income", 0f, e.incomePerDay, 0.001f)
+        assertEquals("no tax means no tax income", 0f, e.taxIncomePerDay, 0.001f)
         assertTrue(e.setTaxRate(12))
         assertEquals(false, e.setTaxRate(12)) // already there
     }
@@ -1950,6 +1966,107 @@ class CityEngineTest {
     }
 
     /** Water cells still beside this one; each adds to the fill price. */
+    @Test
+    fun buyingLandGrowsTheMapAndKeepsTheOldCells() {
+        val e = city()
+        assertEquals(BuildResult.OK, e.build(Tool.ROAD, 12, 12))
+        val oldCols = e.cols
+        val oldRows = e.rows
+        val before = e.funds
+        val price = e.expansionCost
+        assertTrue("new land costs money", price > 0)
+
+        assertEquals(BuildResult.OK, e.build(Tool.EXPAND, 0, 0))
+        assertEquals(oldCols + 1, e.cols)
+        assertEquals(oldRows + 1, e.rows)
+        assertEquals(before - price, e.funds)
+        assertEquals("the old grid keeps its cells", ZoneType.ROAD, e.tile(12, 12)!!.zone)
+        assertEquals("the new column is empty land", ZoneType.NONE, e.tile(oldCols, 0)!!.zone)
+    }
+
+    @Test
+    fun expandedCitySurvivesSaveAndLoad() {
+        val e = city(9)
+        assertEquals(BuildResult.OK, e.build(Tool.EXPAND, 0, 0))
+        assertEquals(BuildResult.OK, e.build(Tool.EXPAND, 0, 0))
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals(e.cols, loaded!!.cols)
+        assertEquals(e.rows, loaded.rows)
+        assertEquals(e.funds, loaded.funds)
+        assertEquals(e.expansionCost, loaded.expansionCost)
+    }
+
+    @Test
+    fun developedLotsClusterIntoANamedNeighbourhood() {
+        val e = city(3)
+        growCluster(e)
+        e.tick()
+        val area = e.areaAt(8, 8)
+        assertNotNull("neighbouring homes make a district", area)
+        assertTrue(area!!.tiles.size >= Config.AREA_MIN_LOTS)
+        assertTrue("the district gets a name", area.name.isNotEmpty())
+        assertTrue("and a feast of its own", area.style.festivalName.isNotEmpty())
+        assertTrue("every style keeps a festival month", area.style.festivalMonth in 1..12)
+    }
+
+    @Test
+    fun aNeighbourhoodKeepsItsFeastInItsOwnMonth() {
+        val e = city(3)
+        growCluster(e)
+        e.tick()
+        val area = e.areas.first()
+        val month = area.style.festivalMonth
+        var celebrated: String? = null
+        var guard = 0
+        while (celebrated == null && guard++ < 400) {
+            growCluster(e)
+            e.tick()
+            if (e.month == month && e.day <= Config.FESTIVAL_DAYS) {
+                celebrated = e.festival?.name
+            }
+        }
+        assertEquals(area.style.festivalName, celebrated)
+    }
+
+    @Test
+    fun districtsTradeHarderAndKeepTheirGivenName() {
+        val e = city(3)
+        for (c in 6..12) {
+            val t = e.tile(c, 8)!!
+            t.zone = ZoneType.COMMERCIAL
+            t.level = 2
+            t.jobs = 10
+        }
+        e.tick()
+        val area = e.areaAt(8, 8)
+        assertNotNull("shops make a district", area)
+        assertTrue("its shops trade harder", e.areaTradePerDay > 0f)
+
+        e.relabelArea(area!!, "Bohemia", AreaStyle.LITTLE_ITALY)
+        e.tick()
+        val renamed = e.areaAt(8, 8)
+        assertNotNull(renamed)
+        assertEquals("Bohemia", renamed!!.name)
+        assertEquals(AreaStyle.LITTLE_ITALY, renamed.style)
+
+        val loaded = CityEngine.load(e.save())
+        assertNotNull(loaded)
+        assertEquals("Bohemia", loaded!!.areaAt(8, 8)!!.name)
+        assertEquals(AreaStyle.LITTLE_ITALY, loaded.areaAt(8, 8)!!.style)
+    }
+
+    /** Stands up a compact block of grown homes, for the neighbourhood tests. */
+    private fun growCluster(e: CityEngine) {
+        for (c in 6..12) {
+            val t = e.tile(c, 8)!!
+            t.zone = ZoneType.RESIDENTIAL
+            t.level = 1
+            t.population = 5
+            t.distress = 0
+        }
+    }
+
     private fun waterSides(e: CityEngine, c: Int, r: Int): Int =
         listOf(c - 1 to r, c + 1 to r, c to r - 1, c to r + 1)
             .count { (cc, rr) -> e.inBounds(cc, rr) && e.tile(cc, rr)!!.terrain == Terrain.WATER }

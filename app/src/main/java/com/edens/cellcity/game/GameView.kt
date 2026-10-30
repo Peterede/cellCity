@@ -12,6 +12,7 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.widget.EditText
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -71,6 +72,14 @@ class GameView(context: Context) : View(context) {
     private val soundRect = RectF()
     private val undoRect = RectF()
     private val advisorRect = RectF()
+
+    // district sheet: every neighbourhood, its numbers, and a jump-to button
+    private var areasOpen = false
+    private val areasRect = RectF()
+    private val areaRowRects = ArrayList<RectF>()
+    /** The district sign under the finger when a gesture starts. */
+    private var areaTapCandidate: CityArea? = null
+
     private var goalsOpen = false
     private val goalRect = RectF()
     private var awardsOpen = false
@@ -346,6 +355,16 @@ class GameView(context: Context) : View(context) {
                     sound.onCrimeReported()
                 }
                 is CityEvent.Notice -> banner(event.text, amber)
+                is CityEvent.FestivalStarted -> {
+                    banner(
+                        "${event.name} - ${event.blurb}",
+                        if (event.bulls) coral else amber,
+                        event.col,
+                        event.row
+                    )
+                    sound.playCheer()
+                }
+                is CityEvent.FestivalEnded -> banner("${event.name} is over", muted)
                 is CityEvent.ContractComplete -> {
                     banner(
                         "Contract complete: ${event.contract.kind.title}  " +
@@ -480,6 +499,10 @@ class GameView(context: Context) : View(context) {
             chipLeft += chipW + gap
         }
 
+        val areasChipW = 78f * density
+        areasRect.set(w - margin - areasChipW, chipTop, w - margin, chipBottom)
+        if (areasOpen) layoutAreaRows(w)
+
         if (advisorOpen) advisorTaxRects(advisorPanel(w))
     }
 
@@ -504,7 +527,7 @@ class GameView(context: Context) : View(context) {
         updateCameraLayout(w, h)
 
         val valid = hoverCol >= 0 && hoverRow >= 0 &&
-            (selected == Tool.BULLDOZE || selected == Tool.INFO ||
+            (selected == Tool.BULLDOZE || selected == Tool.INFO || selected == Tool.EXPAND ||
                 engine.canBuild(selected, hoverCol, hoverRow) == BuildResult.OK)
         renderer.draw(canvas, engine, selected, hoverCol, hoverRow, valid, time, coverageOverlay)
         drawEventFocus(canvas)
@@ -514,6 +537,7 @@ class GameView(context: Context) : View(context) {
         drawTopBar(canvas, w)
         drawBanner(canvas, w)
         drawCoverageChips(canvas)
+        drawAreasChip(canvas)
         drawToolbar(canvas, w, h)
         if (selected == Tool.INFO) drawInspectorCard(canvas, w, h)
         if (tooltipActive) drawTooltip(canvas, w, h)
@@ -521,6 +545,7 @@ class GameView(context: Context) : View(context) {
         if (reportOpen) drawReportOverlay(canvas, w, h)
         if (awardsOpen) drawAwardsOverlay(canvas, w, h)
         if (advisorOpen) drawAdvisorOverlay(canvas, w, h)
+        if (areasOpen) drawAreasOverlay(canvas, w, h)
         drawDecisionCard(canvas, w, h)
     }
 
@@ -531,6 +556,211 @@ class GameView(context: Context) : View(context) {
         val bottom = toolbarTop - 8f * density
         return RectF(margin, top, w - margin, bottom)
     }
+
+    /** The districts sheet is only as tall as the list it has to show. */
+    private fun areasPanel(w: Float): RectF {
+        val margin = 12f * density
+        val top = hudPanelBottom + 8f * density
+        val rows = max(1, engine.areas.size)
+        val wanted = 62f * density + rows * 40f * density + 26f * density
+        val bottom = min(toolbarTop - 8f * density, top + wanted)
+        return RectF(margin, top, w - margin, bottom)
+    }
+
+    private fun layoutAreaRows(w: Float) {
+        val panel = areasPanel(w)
+        areaRowRects.clear()
+        var top = panel.top + 58f * density
+        for (i in engine.areas.indices) {
+            areaRowRects.add(
+                RectF(
+                    panel.left + 10f * density,
+                    top,
+                    panel.right - 10f * density,
+                    top + 36f * density
+                )
+            )
+            top += 40f * density
+        }
+    }
+
+    /** The DISTRICTS chip beside the coverage chips, over the map. */
+    private fun drawAreasChip(canvas: Canvas) {
+        val r = areasRect
+        fill.color = if (areasOpen) amber else paper
+        canvas.drawRoundRect(r, 7f * density, 7f * density, fill)
+        stroke.color = ink
+        stroke.strokeWidth = if (areasOpen) 2f * density else 1.5f * density
+        canvas.drawRoundRect(r, 7f * density, 7f * density, stroke)
+        textBold.textSize = 8.5f * density
+        textBold.color = ink
+        textBold.textAlign = Paint.Align.CENTER
+        canvas.drawText(
+            fitText("DISTRICTS ${engine.areas.size}", textBold, r.width() - 8f * density),
+            r.centerX(),
+            r.centerY() + 3f * density,
+            textBold
+        )
+        textBold.textAlign = Paint.Align.LEFT
+    }
+
+    /** Every neighbourhood with its numbers, its feast and a GO row. */
+    private fun drawAreasOverlay(canvas: Canvas, w: Float, h: Float) {
+        fill.color = 0xB014263B.toInt()
+        canvas.drawRect(0f, 0f, w, h, fill)
+
+        val panel = areasPanel(w)
+        drawPanel(canvas, panel.left, panel.top, panel.right, panel.bottom, paper, 3f * density)
+
+        titlePaint.textSize = 15f * density
+        titlePaint.color = ink
+        canvas.drawText(
+            "DISTRICTS",
+            panel.left + 12f * density,
+            panel.top + 24f * density,
+            titlePaint
+        )
+        text.textSize = 9f * density
+        text.color = muted
+        canvas.drawText(
+            "${engine.areas.size} neighbourhood(s) · tap to fly there",
+            panel.left + 12f * density,
+            panel.top + 40f * density,
+            text
+        )
+
+        if (engine.areas.isEmpty()) {
+            text.textSize = 9.5f * density
+            text.color = muted
+            canvas.drawText(
+                "Zone homes and shops close together",
+                panel.left + 12f * density,
+                panel.top + 66f * density,
+                text
+            )
+            canvas.drawText(
+                "and a district grows up on its own.",
+                panel.left + 12f * density,
+                panel.top + 80f * density,
+                text
+            )
+        }
+
+        val party = engine.festival
+        for ((i, area) in engine.areas.withIndex()) {
+            if (i >= areaRowRects.size) break
+            val r = areaRowRects[i]
+            val celebrating = party != null && (party.citywide || party.areaName == area.name)
+            fill.color = if (celebrating) 0xFFFFF2CE.toInt() else 0xFFF1EAD8.toInt()
+            canvas.drawRoundRect(r, 8f * density, 8f * density, fill)
+            stroke.color = if (celebrating) amber else ink
+            stroke.strokeWidth = if (celebrating) 2.2f * density else 1.3f * density
+            canvas.drawRoundRect(r, 8f * density, 8f * density, stroke)
+
+            textBold.textSize = 10.5f * density
+            textBold.color = ink
+            textBold.textAlign = Paint.Align.LEFT
+            val title = if (celebrating) "${area.name} ★" else area.name
+            canvas.drawText(
+                fitText(title, textBold, r.width() - 62f * density),
+                r.left + 9f * density,
+                r.top + 14f * density,
+                textBold
+            )
+
+            text.textSize = 8f * density
+            text.color = muted
+            canvas.drawText(
+                "${area.population} residents · ${area.jobs} jobs · " +
+                    "${CityClock.monthName(area.style.festivalMonth)} feast",
+                r.left + 9f * density,
+                r.top + 27f * density,
+                text
+            )
+
+            textBold.textSize = 9f * density
+            textBold.color = ink
+            textBold.textAlign = Paint.Align.RIGHT
+            canvas.drawText("GO ›", r.right - 9f * density, r.centerY() + 3f * density, textBold)
+            textBold.textAlign = Paint.Align.LEFT
+        }
+
+        text.textSize = 8.5f * density
+        text.color = muted
+        text.textAlign = Paint.Align.RIGHT
+        canvas.drawText(
+            "Tap to close",
+            panel.right - 12f * density,
+            panel.bottom - 9f * density,
+            text
+        )
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    /** Glides the camera to a district and drops the event arrow on it. */
+    private fun flyToArea(area: CityArea) {
+        val cam = renderer.camera
+        val maxX = (engine.cols + engine.rows) * cam.tileW * 0.5f * cam.zoom * 0.7f
+        val maxY = (engine.cols + engine.rows) * cam.tileH * 0.5f * cam.zoom * 0.7f
+        panTargetX = (-(area.col - area.row) * cam.tileW * 0.5f * cam.zoom).coerceIn(-maxX, maxX)
+        panTargetY = (-(area.col + area.row) * cam.tileH * 0.5f * cam.zoom).coerceIn(-maxY, maxY)
+        eventCol = area.col
+        eventRow = area.row
+        eventHighlightTimer = 6f
+        lastPaintCol = -1
+        lastPaintRow = -1
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        invalidate()
+    }
+
+    /** Tapping a district sign: rename it or give it another theme. */
+    private fun showAreaMenu(area: CityArea) {
+        val wasSpeed = speed
+        speed = 0
+        val styles = AreaStyle.values()
+        val options = Array(1 + styles.size) { i ->
+            if (i == 0) "Rename district" else "Theme: ${styles[i - 1].label}"
+        }
+        AlertDialog.Builder(context, android.R.style.Theme_Material_Light_Dialog_Alert)
+            .setTitle("${area.name} - ${area.style.label}")
+            .setItems(options) { _, which ->
+                if (which == 0) {
+                    promptAreaName(area, wasSpeed)
+                } else {
+                    speed = wasSpeed
+                    engine.relabelArea(area, null, styles[which - 1])
+                    saveCity()
+                    banner("Rethemed - the district is now ${currentAreaName(area)}", amber)
+                    invalidate()
+                }
+            }
+            .setNegativeButton("Close") { _, _ -> speed = wasSpeed }
+            .setOnCancelListener { speed = wasSpeed }
+            .show()
+    }
+
+    private fun promptAreaName(area: CityArea, wasSpeed: Int) {
+        val input = EditText(context).apply {
+            setText(area.name)
+            setSingleLine()
+            setSelection(text.length)
+        }
+        AlertDialog.Builder(context, android.R.style.Theme_Material_Light_Dialog_Alert)
+            .setTitle("Name this district")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                engine.relabelArea(area, input.text.toString(), null)
+                saveCity()
+                banner("Welcome to ${currentAreaName(area)}", mint)
+                invalidate()
+            }
+            .setNegativeButton("Cancel", null)
+            .setOnDismissListener { speed = wasSpeed }
+            .show()
+    }
+
+    private fun currentAreaName(area: CityArea): String =
+        engine.areaAt(area.col, area.row)?.name ?: area.name
 
     private fun goalsHeaderH(): Float = 80f * density
     private fun goalsFooterH(): Float = 28f * density
@@ -2283,6 +2513,36 @@ class GameView(context: Context) : View(context) {
         stroke.strokeWidth = 1.7f * density
         fill.color = color
         when (tool) {
+            Tool.EXPAND -> {
+                // a plot growing out of the map edge, with a plus sign over it
+                stroke.color = color
+                stroke.strokeWidth = 1.6f * density
+                fill.color = paper
+                rect.set(cx - s * 0.92f, cy - s * 0.3f, cx + s * 0.28f, cy + s * 0.72f)
+                canvas.drawRect(rect, fill)
+                canvas.drawRect(rect, stroke)
+                dash.color = color
+                dash.strokeWidth = 1.5f * density
+                path.reset()
+                path.moveTo(cx + s * 0.28f, cy - s * 0.06f)
+                path.lineTo(cx + s * 0.95f, cy - s * 0.48f)
+                path.moveTo(cx + s * 0.28f, cy + s * 0.44f)
+                path.lineTo(cx + s * 0.95f, cy + s * 0.02f)
+                canvas.drawPath(path, dash)
+                fill.color = amber
+                canvas.drawCircle(cx + s * 0.52f, cy - s * 0.58f, s * 0.36f, fill)
+                stroke.color = ink
+                stroke.strokeWidth = 1.5f * density
+                canvas.drawCircle(cx + s * 0.52f, cy - s * 0.58f, s * 0.36f, stroke)
+                stroke.color = ink
+                stroke.strokeWidth = 1.7f * density
+                path.reset()
+                path.moveTo(cx + s * 0.3f, cy - s * 0.58f)
+                path.lineTo(cx + s * 0.74f, cy - s * 0.58f)
+                path.moveTo(cx + s * 0.52f, cy - s * 0.8f)
+                path.lineTo(cx + s * 0.52f, cy - s * 0.36f)
+                canvas.drawPath(path, stroke)
+            }
             Tool.STATION -> {
                 stroke.color = color
                 stroke.strokeWidth = 1.6f * density
@@ -2906,6 +3166,13 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun hintText(): String {
+        if (selected == Tool.EXPAND) {
+            return if (!engine.canExpand) {
+                "The map is as large as it gets"
+            } else {
+                "Tap to buy another ring of land - ${costLabel(engine.expansionCost)}"
+            }
+        }
         if (engine.roadCount == 0 && engine.highwayCount == 0 &&
             selected != Tool.ROAD && selected != Tool.HIGHWAY && selected != Tool.PAN
         ) {
@@ -2964,6 +3231,7 @@ class GameView(context: Context) : View(context) {
             if (value >= engine.milestoneTarget(goal) - 1) return "GOALS: ${goal.title} is nearly done"
         }
         return when (selected) {
+            Tool.EXPAND -> "GROW - tap to buy a ring of land east and south"
             Tool.PAN -> "Drag to pan - pinch to zoom"
             Tool.BULLDOZE -> "Tap a tile to clear it (and its main) - 25% refund"
             Tool.PLANT -> "PLANT $2500 - powers connected roads"
@@ -3061,6 +3329,22 @@ class GameView(context: Context) : View(context) {
                     performClick()
                     return true
                 }
+                if (areasOpen) {
+                    for (i in areaRowRects.indices) {
+                        if (areaRowRects[i].contains(x, y)) {
+                            val area = engine.areas.getOrNull(i)
+                            areasOpen = false
+                            if (area != null) flyToArea(area)
+                            performClick()
+                            invalidate()
+                            return true
+                        }
+                    }
+                    areasOpen = false
+                    performClick()
+                    invalidate()
+                    return true
+                }
                 if (reportOpen) {
                     reportOpen = false
                     performClick()
@@ -3135,6 +3419,13 @@ class GameView(context: Context) : View(context) {
                         return true
                     }
                 }
+                if (areasRect.contains(x, y)) {
+                    areasOpen = !areasOpen
+                    tooltipActive = false
+                    performClick()
+                    invalidate()
+                    return true
+                }
                 // the event banner is a shortcut to whatever it is about
                 if (bannerTimer > 0f && bannerRect.contains(x, y)) {
                     if (eventCol >= 0 && eventRow >= 0) {
@@ -3173,6 +3464,7 @@ class GameView(context: Context) : View(context) {
                 activePointer = event.getPointerId(0)
                 downX = x
                 downY = y
+                areaTapCandidate = renderer.areaLabelAt(x, y, engine)
                 lastTouchX = x
                 lastTouchY = y
                 lastPaintCol = -1
@@ -3304,6 +3596,17 @@ class GameView(context: Context) : View(context) {
                 val x = event.x
                 val y = event.y
                 removeCallbacks(longPressRunnable)
+                val signTap = areaTapCandidate
+                areaTapCandidate = null
+                if (signTap != null && mode == MODE_PAINT && !didPaint &&
+                    hypot(x - downX, y - downY) <= touchSlop
+                ) {
+                    engine.endAction()
+                    mode = MODE_NONE
+                    activePointer = -1
+                    showAreaMenu(signTap)
+                    return true
+                }
                 if (goalsOpen) {
                     if (goalsPressed && !goalsMoved) {
                         if (awardsRect.contains(x, y)) {
@@ -3341,6 +3644,7 @@ class GameView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressRunnable)
+                areaTapCandidate = null
                 if (goalsOpen) {
                     goalsPressed = false
                     goalsMoved = false
@@ -3597,6 +3901,30 @@ class GameView(context: Context) : View(context) {
         val row = cam.screenToRow(x, y)
         if (!engine.inBounds(col, row)) return
         if (col == lastPaintCol && row == lastPaintRow) return
+
+        if (selected == Tool.EXPAND) {
+            if (!force) return
+            lastPaintCol = col
+            lastPaintRow = row
+            val price = engine.expansionCost
+            when {
+                !engine.canExpand -> banner("The city has reached the edge of the map", amber)
+                engine.funds < price ->
+                    banner("New land costs ${costLabel(price)} - not enough funds", coral)
+
+                engine.expand() -> {
+                    clampCamera()
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    banner(
+                        "Land bought - the city now spans ${engine.cols} x ${engine.rows}",
+                        mint
+                    )
+                    invalidate()
+                }
+                else -> banner("That land could not be bought", coral)
+            }
+            return
+        }
 
         val tile = engine.tile(col, row) ?: return
         val beforeZone = tile.zone

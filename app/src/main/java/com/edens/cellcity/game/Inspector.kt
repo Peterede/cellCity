@@ -419,6 +419,28 @@ object CityInspector {
             }
         }
 
+        val area = engine.areaAt(col, row)
+        if (area != null) {
+            facts.add(TileFact("Neighbourhood", "${area.name} - ${area.style.blurb}"))
+            facts.add(
+                TileFact(
+                    "Feast",
+                    "${CityClock.monthName(area.style.festivalMonth)} 1-7 · " +
+                        area.style.festivalName
+                )
+            )
+            if (area.comJobs > 0) {
+                facts.add(TileFact("District trade", "+12% on shop tax from this district"))
+            }
+            if (area.landmarks > 0) {
+                facts.add(TileFact("Destination", "parks or transit keep the mood up"))
+            }
+        }
+        val party = engine.festival
+        if (party != null && (party.citywide || party.areaName == area?.name)) {
+            facts.add(TileFact("Festival", "${party.name} - ${party.blurb}"))
+        }
+
         // problems first, so the card leads with what actually needs fixing
         val ordered = needs.sortedBy {
             when (it.state) {

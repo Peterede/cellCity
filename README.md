@@ -70,6 +70,20 @@ Canal or natural, water is worth money to the tax roll: every lot with open wate
 ### Big buildings
 
 - An **airport** is a single 2x2 landmark: it needs four clear tiles, at least one of them beside a road, and is charged once. Bulldozing any of its tiles removes the whole airport for one refund.
+
+## Neighbourhoods and festivals
+
+Enough developed lots close together grow into a named district on their own: **Little Italy**, **Chinatown**, **Little Havana**, **Little India** or **Little Spain**. The name comes from the cluster itself, so it is stable, and the district sign floats over the middle of it. A district lifts the mood a little, and the info tool names the neighbourhood a cell belongs to.
+
+Each district keeps a feast day in the city calendar, on the first days of its own month: the Feast of San Gennaro in September, Lunar New Year in February, Carnaval in July, Diwali in November and the Feria de Abril in April. While the feast runs, banners go up over that neighbourhood's terraces, the mood climbs, and visitors spend in its shops.
+
+July also brings the **Running of the Bulls** once the city has 80 residents: a citywide week of white shirts and red scarves, with a bull and its runners charging along the host neighbourhood's streets, tourist takings in the treasury and the occasional story about a tourist in flip-flops.
+
+Districts pay their way. Shop jobs inside a district bring in **12% more tax** than the same shops on an anonymous street, and a district with a park, station, subway stop or airport within three tiles keeps its residents in a better mood. The **DISTRICTS** chip over the map lists every neighbourhood with its residents, jobs and feast month; tap a row to fly the camera there. Tap a district's sign on the map to rename it or give it another theme - the name and theme belong to that block and survive a reload.
+
+## Growing the map
+
+The city does not have to stay 24 x 24. The **GROW** tool buys one more column east and one more row south for a price that rises with the size of the city, up to 40 x 40. Existing tiles keep their coordinates, so every road, zone and building stays exactly where it was placed, and the new land arrives as open grass and forest ready to zone. The map size is stored in the save file, so an expanded city reloads at its full size.
 - Four developed lots of the **same zone** that all reach level 2 merge into one large building. The merged block levels up as a single structure and every lot gains 35% extra capacity; the city block is drawn as one wide building across all four tiles.
 - Four **park** tiles in a 2x2 block group into one large park as soon as the last one is placed. It is drawn as a single green space with paths, a fountain and a pond, and every tile still counts toward park coverage, contracts and the Green Belt award. Bulldozing any of its tiles removes the whole park for one refund.
 

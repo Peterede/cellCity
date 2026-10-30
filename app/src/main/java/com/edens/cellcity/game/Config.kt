@@ -125,6 +125,40 @@ object Config {
     /** Lots beside open water - or standing on filled land - hold this much more. */
     const val WATERFRONT_CAPACITY = 1.12f
 
+    // --- neighbourhoods and festivals --------------------------------------
+    /** Developed lots this close together grow into one named neighbourhood. */
+    const val AREA_MIN_LOTS = 5
+    /** Tiles a cluster may skip between two lots and still be one neighbourhood. */
+    const val AREA_GAP = 2
+    /** A neighbourhood feast runs for the first days of its month. */
+    const val FESTIVAL_DAYS = 7
+    /** The running of the bulls: a citywide week in July, once the city is big. */
+    const val BULLS_MONTH = 7
+    const val BULLS_FIRST_DAY = 6
+    const val BULLS_LAST_DAY = 14
+    const val BULLS_MIN_POPULATION = 80
+    /** Mood and visitor takings while a feast is on. */
+    const val FESTIVAL_HAPPINESS = 9f
+    const val NEIGHBOURHOOD_HAPPINESS = 3f
+    const val FESTIVAL_TAX_PER_LOT = 0.9f
+    const val BULLS_TAX_PER_RESIDENT = 0.05f
+    /** Chance per bull-run day of a story worth telling. */
+    const val BULLS_INCIDENT_CHANCE = 0.02f
+    /** Shops inside a named district pay this much more tax than anonymous ones. */
+    const val AREA_TRADE_BONUS = 0.12f
+    /** Mood a district earns when a park or a station makes it a destination. */
+    const val AREA_LANDMARK_MOOD = 1.5f
+    const val AREA_LANDMARK_RANGE = 3
+    /** Longest district name a player may set. */
+    const val AREA_NAME_MAX = 22
+
+    // --- growing the map ---------------------------------------------------
+    /** A new ring of land: a base price plus what the city already covers. */
+    const val COST_EXPAND = 600
+    const val COST_EXPAND_PER_TILE = 4
+    const val MAX_COLS = 40
+    const val MAX_ROWS = 40
+
     // --- progression -------------------------------------------------------
     /** Below this many residents a city is too small to judge as "stable". */
     const val STABLE_MIN_POPULATION = 20
